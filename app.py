@@ -1116,6 +1116,197 @@ def run_breakout_scan(min_perf_1m, min_price, asset_filter, exchange_filter,
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+#  PARABOLIC LONG SCANNER
+#  Inverse of Parabolic Short: stocks down 40%+ in ≤10 days, vol spiking,
+#  first green day = bounce entry on ORH. Targets 50-100% bounce.
+# ─────────────────────────────────────────────────────────────────────────────
+
+def phase1_parabolic_long(min_drop_5d: float, min_vol: int, min_price: float,
+                          asset_filter: str, exchange_filter: list,
+                          mcap_tiers: list | None = None) -> tuple[list, str | None]:
+    """Phase 1 — TV scan: stocks down sharply in 5 days, high rel vol today."""
+    try:
+        from tradingview_screener import Query, Column
+    except ImportError:
+        return [], "tradingview-screener not installed"
+
+    tv_exchanges = list({TV_EXCHANGE_MAP[e] for e in exchange_filter
+                         if e in TV_EXCHANGE_MAP and TV_EXCHANGE_MAP[e]})
+    try:
+        q = (
+            Query()
+            .set_markets("america")
+            .select("name", "close", "change", "Perf.5D", "Perf.1M",
+                    "relative_volume_10d_calc", "volume", "SMA10", "SMA20",
+                    "ATR", "gap", "type", "exchange", "market_cap_basic")
+            .where(
+                Column("close") > min_price,
+                Column("volume") > min_vol,
+                Column("Perf.5D") <= -min_drop_5d,       # down hard in 5 days
+                Column("relative_volume_10d_calc") >= 1.5, # vol spiking = real panic
+                Column("change") >= 0,                    # today is green (first bounce)
+            )
+            .order_by("Perf.5D", ascending=True)           # worst drops first
+            .limit(300)
+        )
+        if asset_filter == "ETFs Only":
+            q = q.where(Column("type").isin(["fund", "etf"]))
+        elif asset_filter == "Stocks Only":
+            q = q.where(Column("type") == "stock")
+        if tv_exchanges:
+            q = q.where(Column("exchange").isin(tv_exchanges))
+        if mcap_tiers and "All" not in mcap_tiers:
+            cap_conditions = []
+            for tier in mcap_tiers:
+                lo, hi = MCAP_TIERS.get(tier, (0, None))
+                if lo and hi:
+                    cap_conditions.append((Column("market_cap_basic") >= lo) & (Column("market_cap_basic") < hi))
+                elif lo:
+                    cap_conditions.append(Column("market_cap_basic") >= lo)
+                elif hi:
+                    cap_conditions.append(Column("market_cap_basic") < hi)
+            if cap_conditions:
+                combined = cap_conditions[0]
+                for c in cap_conditions[1:]: combined = combined | c
+                q = q.where(combined)
+
+        _, df = q.get_scanner_data()
+    except Exception as e:
+        return [], f"TradingView API error: {e}"
+
+    if df is None or df.empty:
+        return [], None
+
+    for col in ["change", "Perf.5D", "Perf.1M", "relative_volume_10d_calc",
+                "SMA10", "SMA20", "ATR", "gap"]:
+        if col not in df.columns: df[col] = 0.0
+    df = df.fillna(0.0)
+    df["is_etf"] = df["type"].isin(["fund", "etf", "dr"])
+
+    return (
+        df[["name", "close", "change", "Perf.5D", "Perf.1M",
+            "relative_volume_10d_calc", "SMA10", "SMA20", "ATR",
+            "gap", "exchange", "is_etf"]]
+        .rename(columns={"name": "ticker", "close": "tv_close",
+                         "change": "day_chg", "Perf.5D": "drop_5d",
+                         "Perf.1M": "drop_1m",
+                         "relative_volume_10d_calc": "rel_vol"})
+        .to_dict("records"),
+        None,
+    )
+
+
+def phase2_pl_confirm(candidate: dict, min_vol: int) -> dict | None:
+    """Phase 2 Parabolic Long — measure collapse speed, prior trend, bounce quality."""
+    ticker   = candidate["ticker"]
+    tv_close = float(candidate.get("tv_close") or 0)
+    drop_5d  = float(candidate.get("drop_5d") or 0)
+    rel_vol  = float(candidate.get("rel_vol") or 0)
+    day_chg  = float(candidate.get("day_chg") or 0)
+    sma10    = float(candidate.get("SMA10") or 0)
+    sma20    = float(candidate.get("SMA20") or 0)
+    atr      = float(candidate.get("ATR") or 0)
+
+    if tv_close <= 0:
+        return None
+
+    consec_down  = 0
+    prior_high   = None
+    drop_from_high = None
+    avg_vol      = None
+
+    try:
+        df = yf.download(ticker, period="3mo", interval="1d",
+                         progress=False, auto_adjust=False)
+        if not df.empty:
+            if isinstance(df.columns, pd.MultiIndex):
+                df.columns = df.columns.get_level_values(0)
+            close_col = "Close" if "Close" in df.columns else "Adj Close"
+            high_col  = "High"
+            if all(c in df.columns for c in [close_col, "Volume"]):
+                closes  = df[close_col].squeeze().dropna()
+                volumes = df["Volume"].squeeze()
+                highs   = df[high_col].squeeze() if high_col in df.columns else closes
+
+                if len(volumes) >= 5:
+                    avg_vol = float(volumes.tail(20).mean())
+
+                # Count consecutive down days before today
+                if len(closes) >= 3:
+                    for i in range(len(closes) - 2, 0, -1):
+                        if float(closes.iloc[i]) < float(closes.iloc[i - 1]):
+                            consec_down += 1
+                        else:
+                            break
+
+                # Prior high in the past 3 months → how far did it drop?
+                if len(highs) >= 10:
+                    prior_high   = float(highs.tail(65).max())
+                    drop_from_high = round((tv_close - prior_high) / prior_high * 100, 1)
+
+    except Exception:
+        pass
+
+    if avg_vol is not None and avg_vol >= 1_000_000:
+        avg_vol_disp = f"{avg_vol/1_000_000:.1f}M"
+    elif avg_vol is not None and avg_vol >= 1_000:
+        avg_vol_disp = f"{avg_vol/1_000:.0f}K"
+    else:
+        avg_vol_disp = "N/A"
+
+    # Bounce score: sharper drop + more down days + higher vol = more coiled spring
+    speed_score   = min(abs(drop_5d) / 5, 10)          # 50% drop in 5d = 10
+    streak_score  = min(consec_down * 1.5, 10)
+    vol_score     = min((rel_vol - 1) * 3, 10)
+    bounce_score  = round((speed_score * 0.4 + streak_score * 0.3 + vol_score * 0.3), 1)
+
+    # Distance from MAs — below both = more room to snap back
+    dist_10 = round((tv_close - sma10) / sma10 * 100, 1) if sma10 > 0 else None
+    dist_20 = round((tv_close - sma20) / sma20 * 100, 1) if sma20 > 0 else None
+
+    return {
+        "ticker":           ticker,
+        "price":            round(tv_close, 2),
+        "day_chg":          round(day_chg, 2),
+        "drop_5d":          round(drop_5d, 1),
+        "drop_1m":          round(float(candidate.get("drop_1m") or 0), 1),
+        "drop_from_high":   drop_from_high,
+        "consec_down":      consec_down,
+        "rel_vol":          round(rel_vol, 2),
+        "avg_vol":          avg_vol_disp,
+        "bounce_score":     bounce_score,
+        "dist_10":          dist_10,
+        "dist_20":          dist_20,
+        "atr":              round(atr, 2),
+        "is_etf":           candidate["is_etf"],
+        "exchange":         candidate["exchange"],
+    }
+
+
+def run_parabolic_long_scan(min_drop_5d, min_price, asset_filter, exchange_filter,
+                             min_vol, mcap_tiers, workers, p1_cb, p2_cb):
+    candidates, err = phase1_parabolic_long(min_drop_5d, min_vol, min_price,
+                                             asset_filter, exchange_filter, mcap_tiers)
+    if err:
+        p1_cb(f"Phase 1 warning: {err}", 0)
+        candidates = []
+    p1_cb(None, len(candidates))
+    if not candidates:
+        return []
+
+    total, done, results = len(candidates), 0, []
+    with ThreadPoolExecutor(max_workers=workers) as ex:
+        futs = {ex.submit(phase2_pl_confirm, c, min_vol): c for c in candidates}
+        for fut in as_completed(futs):
+            done += 1
+            p2_cb(done / total, done, total)
+            res = fut.result()
+            if res:
+                results.append(res)
+    return sorted(results, key=lambda x: x["bounce_score"], reverse=True)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 #  SIDEBAR
 # ─────────────────────────────────────────────────────────────────────────────
 with st.sidebar:
@@ -1181,6 +1372,16 @@ with st.sidebar:
 
     # Guide content moved to Playbook tab
 
+    st.markdown('<span class="sec-label">Parabolic Long</span>', unsafe_allow_html=True)
+    min_drop_pl = st.number_input("Min 5D Drop %", value=30.0, step=5.0, min_value=10.0, key="pl_drop",
+                                   help="Stock must be down at least this much in 5 days")
+
+    st.markdown('<span class="sec-label">Episodic Pivot</span>', unsafe_allow_html=True)
+    min_gap_ep = st.number_input("Min Gap %", value=10.0, step=1.0, min_value=3.0, key="ep_gap")
+
+    st.markdown('<span class="sec-label">Momentum Breakout</span>', unsafe_allow_html=True)
+    min_perf_bo = st.number_input("Min 1M Gain %", value=25.0, step=5.0, min_value=5.0, key="bo_perf")
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 #  MAIN — TABBED LAYOUT
@@ -1192,10 +1393,11 @@ st.markdown("""
 </div>
 """, unsafe_allow_html=True)
 
-tab_ps, tab_ep, tab_bo, tab_guide = st.tabs([
+tab_ps, tab_ep, tab_bo, tab_pl, tab_guide = st.tabs([
     "📉  Parabolic Short",
     "⚡  Episodic Pivot",
     "🚀  Momentum Breakout",
+    "📈  Parabolic Long",
     "📖  Playbook",
 ])
 
@@ -1466,9 +1668,8 @@ Also elevated: {others_txt}
 with tab_ep:
     _status_row("Episodic Pivot", "yfinance enrich")
 
-    ep_btn_col, ep_dl_col, ep_gap_col = st.columns([1, 1, 2])
-    run_ep     = ep_btn_col.button("▶  RUN SCAN", key="run_ep")
-    min_gap_ep = ep_gap_col.number_input("Min Gap %", value=10.0, step=1.0, min_value=3.0, key="ep_gap")
+    ep_btn_col, ep_dl_col, _ = st.columns([1, 1, 7])
+    run_ep = ep_btn_col.button("▶  RUN SCAN", key="run_ep")
 
     _show_chart_panel("ep")
 
@@ -1592,9 +1793,8 @@ with tab_ep:
 with tab_bo:
     _status_row("Momentum Breakout", "yfinance enrich")
 
-    bo_btn_col, bo_dl_col, bo_perf_col = st.columns([1, 1, 2])
-    run_bo      = bo_btn_col.button("▶  RUN SCAN", key="run_bo")
-    min_perf_bo = bo_perf_col.number_input("Min 1M Gain %", value=25.0, step=5.0, min_value=5.0, key="bo_perf")
+    bo_btn_col, bo_dl_col, _ = st.columns([1, 1, 7])
+    run_bo = bo_btn_col.button("▶  RUN SCAN", key="run_bo")
 
     _show_chart_panel("bo")
 
@@ -1716,6 +1916,137 @@ with tab_bo:
 # ══════════════════════════════════════════════════════════════════════════════
 #  TAB 4 — PLAYBOOK (GUIDE)
 # ══════════════════════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════════════════════
+#  TAB 4 — PARABOLIC LONG
+# ══════════════════════════════════════════════════════════════════════════════
+with tab_pl:
+    _status_row("Parabolic Long", "yfinance enrich")
+
+    pl_btn_col, pl_dl_col, _ = st.columns([1, 1, 7])
+    run_pl = pl_btn_col.button("▶  RUN SCAN", key="run_pl")
+
+    _show_chart_panel("pl")
+
+    if run_pl:
+        results_pl = _run_phase_ui(
+            lambda p1_cb, p2_cb: run_parabolic_long_scan(
+                min_drop_pl, min_price, asset_filter, exchange_filter,
+                int(min_vol), mcap_tiers, workers, p1_cb, p2_cb,
+            ),
+            {},
+            "results_pl",
+        )
+
+    if "results_pl" in st.session_state:
+        results  = st.session_state["results_pl"]
+        scan_ts  = st.session_state.get("results_pl_ts", "")
+        n_hits   = len(results)
+        p1_count = st.session_state.get("results_pl_p1n", "—")
+
+        top_drop  = f"{results[0]['drop_5d']}%" if results else "—"
+        top_score = f"{results[0]['bounce_score']}" if results else "—"
+        coiled    = sum(1 for r in results if r["bounce_score"] >= 7)
+
+        st.markdown(f"""
+<div class="metric-row">
+  <div class="metric-box hi"><div class="metric-label">Bounce Candidates</div>
+    <div class="metric-value amber">{n_hits}</div>
+    <div class="metric-sub">{scan_ts}</div></div>
+  <div class="metric-box"><div class="metric-label">Sharpest Drop</div>
+    <div class="metric-value">{top_drop}</div>
+    <div class="metric-sub">5-day collapse</div></div>
+  <div class="metric-box"><div class="metric-label">Top Bounce Score</div>
+    <div class="metric-value">{top_score}</div>
+    <div class="metric-sub">speed × streak × vol</div></div>
+  <div class="metric-box"><div class="metric-label">Highly Coiled</div>
+    <div class="metric-value">{coiled}</div>
+    <div class="metric-sub">score ≥ 7 / 10</div></div>
+</div>""", unsafe_allow_html=True)
+
+        if results:
+            df_exp = pd.DataFrame(results)
+            pl_dl_col.download_button("↓ CSV", data=df_exp.to_csv(index=False).encode(),
+                file_name=f"pl_{datetime.now().strftime('%Y%m%d_%H%M')}.csv", mime="text/csv")
+
+        if not results:
+            st.markdown("""
+<div class="empty-state">
+  <div class="empty-icon">📈</div>
+  <div class="empty-text">No Parabolic Long candidates today</div>
+  <div class="empty-hint">Try lowering Min 5D Drop % or waiting for a market sell-off day</div>
+</div>""", unsafe_allow_html=True)
+        else:
+            if "chart_ticker_pl" not in st.session_state:
+                st.session_state["chart_ticker_pl"]   = None
+                st.session_state["chart_exchange_pl"] = None
+
+            COLS = 3
+            for i in range(0, len(results), COLS):
+                chunk = results[i:i + COLS]
+                cols  = st.columns(COLS)
+                for col, r in zip(cols, chunk):
+                    day_chg   = round(float(r["day_chg"]), 2)
+                    chg_cls   = "pos" if day_chg >= 0 else "neg"
+                    chg_sign  = "+" if day_chg >= 0 else ""
+                    drop_val  = r["drop_5d"]
+                    sc        = r["bounce_score"]
+                    score_col = "#34d399" if sc >= 7 else "#f59e0b" if sc >= 4 else "#607080"
+                    type_lbl  = "ETF" if r["is_etf"] else "STOCK"
+                    type_cls  = "tag-etf" if r["is_etf"] else "tag-stock"
+                    dfh       = r.get("drop_from_high")
+                    dfh_str   = f"{dfh}%" if dfh is not None else "N/A"
+                    dist20    = r.get("dist_20") or 0
+                    dist_cls  = "neg" if dist20 < -5 else "warn" if dist20 < 0 else "pos"
+                    high_score = sc >= 7
+                    badge_coil = '<span class="tag tag-streak">🔥 COILED</span>' if high_score else ""
+                    btn_key   = f"pl_chart_{r['ticker']}_{i}"
+                    col.markdown(f"""
+<div class="card">
+  <span class="atr-badge atr-norm" style="background:rgba(52,211,153,0.12);color:#34d399;border-color:#059669">{sc}</span>
+  <div class="card-ticker">{r['ticker']}</div>
+  <div class="card-price">${r['price']:,.2f}</div>
+  <div class="card-divider"></div>
+  <div class="card-stats">
+    <div><span class="stat-k">5D Drop</span><span class="stat-v neg">{drop_val}%</span></div>
+    <div><span class="stat-k">Today</span><span class="stat-v {chg_cls}">{chg_sign}{day_chg}%</span></div>
+    <div><span class="stat-k">Rel Vol</span><span class="stat-v warn">{r['rel_vol']}×</span></div>
+    <div><span class="stat-k">vs SMA20</span><span class="stat-v {dist_cls}">{dist20:+.1f}%</span></div>
+  </div>
+  <div class="signal-row">
+    <div class="sig-cell"><span class="sig-label">Bounce Score</span><span class="sig-val" style="color:{score_col}">{sc}</span></div>
+    <div class="sig-cell"><span class="sig-label">Down Days</span><span class="sig-val neg">{r['consec_down']}d ↓</span></div>
+    <div class="sig-cell"><span class="sig-label">From High</span><span class="sig-val neg">{dfh_str}</span></div>
+  </div>
+  <div class="card-tags">
+    <span class="tag {type_cls}">{type_lbl}</span>
+    <span class="tag tag-exch">{r['exchange']}</span>
+    {badge_coil}
+  </div>
+</div>""", unsafe_allow_html=True)
+                    if col.button(f"📈  {r['ticker']}", key=btn_key, use_container_width=True):
+                        st.session_state["chart_ticker_pl"]   = r["ticker"]
+                        st.session_state["chart_exchange_pl"] = r["exchange"]
+                        st.rerun()
+
+            with st.expander(f"▸  Full Results  ({n_hits} rows)"):
+                disp = pd.DataFrame(results).rename(columns={
+                    "ticker": "Ticker", "exchange": "Exchange", "is_etf": "ETF",
+                    "price": "Price", "day_chg": "Day Chg %",
+                    "drop_5d": "5D Drop %", "drop_1m": "1M Drop %",
+                    "drop_from_high": "Drop from High %",
+                    "consec_down": "Down Days", "rel_vol": "Rel Vol",
+                    "avg_vol": "Avg Volume", "bounce_score": "Bounce Score",
+                    "dist_10": "vs SMA10 %", "dist_20": "vs SMA20 %",
+                })
+                st.dataframe(disp, use_container_width=True, hide_index=True)
+    else:
+        st.markdown("""
+<div class="empty-state" style="margin-top:3rem">
+  <div class="empty-icon">📈</div>
+  <div class="empty-text">Parabolic Long Scanner</div>
+  <div class="empty-hint">Finds stocks collapsed 30%+ in 5 days — first green day bounce. Entry on opening range highs. Targets 50–100%.</div>
+</div>""", unsafe_allow_html=True)
+
 with tab_guide:
     st.markdown("""
 <style>
