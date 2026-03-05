@@ -314,124 +314,92 @@ def wilder_atr(high: pd.Series, low: pd.Series, close: pd.Series, period: int = 
 def phase2_confirm(candidate: dict, sma_period: int, atr_period: int,
                    min_price: float, min_vol: int, min_atr_mult: float) -> dict | None:
     """
-    Phase 2 — yfinance precision confirmation.
+    Phase 2 — enrich TV candidates with yfinance volume + day change only.
 
-    IMPORTANT: auto_adjust=False is intentional.
-    auto_adjust=True retroactively shifts the entire price series for dividends,
-    causing the displayed close price to diverge significantly from the real
-    market price (e.g. ALSN showing $161 instead of $127). We use unadjusted
-    OHLCV for all calculations so prices match what traders see on their charts.
-    The TV close from Phase 1 is used as the authoritative current price sanity
-    check — if yfinance diverges by >8% from TV, the data is unreliable and we skip.
+    The ATR multiple is computed entirely from TV ground-truth values
+    (tv_close, tv_sma50, tv_atr) which already match the chart exactly.
+    yfinance is only used for avg_vol and day_chg — fields TV doesn't expose
+    in the screener API. If yfinance data is unusable we fall back to TV values.
     """
     ticker   = candidate["ticker"]
-    # TV authoritative values — used as ground truth for price & SMA sanity checks
-    tv_close = candidate.get("tv_close", None)
-    tv_sma50 = candidate.get("tv_sma50", None)
-    tv_atr   = candidate.get("tv_atr",   None)
+    tv_close = float(candidate.get("tv_close") or 0)
+    tv_sma50 = float(candidate.get("tv_sma50") or 0)
+    tv_atr   = float(candidate.get("tv_atr")   or 0)
 
-    try:
-        df = yf.download(ticker, period="6mo", interval="1d",
-                         progress=False, auto_adjust=False)
-        if df.empty or len(df) < sma_period + 5:
-            return None
-        if isinstance(df.columns, pd.MultiIndex):
-            df.columns = df.columns.get_level_values(0)
-
-        close_col = "Close" if "Close" in df.columns else "Adj Close"
-        for col in (close_col, "High", "Low", "Volume"):
-            if col not in df.columns:
-                return None
-
-        close  = df[close_col].squeeze().dropna()
-        high   = df["High"].squeeze()
-        low    = df["Low"].squeeze()
-        volume = df["Volume"].squeeze()
-
-        if len(close) < sma_period + 5:
-            return None
-
-        yf_last = float(close.iloc[-1])
-
-        # ── Strict price cross-check ─────────────────────────────────────────
-        # If yfinance last close differs from TV close by >5%, yfinance is
-        # returning aliased / corporate-action-distorted data. Reject entirely.
-        # Do NOT scale — scaling fixes the last price but leaves the historical
-        # SMA computed on the wrong data series, producing garbage multiples.
-        if tv_close and tv_close > 0:
-            if abs(yf_last - tv_close) / tv_close > 0.05:
-                return None
-            last_close = tv_close   # use TV's authoritative close
-        else:
-            last_close = yf_last
-
-        if last_close < min_price:
-            return None
-
-        avg_vol = float(volume.tail(20).mean())
-        if avg_vol < min_vol:
-            return None
-
-        # Ghost/aliased data guard
-        if close.tail(20).nunique() <= 3:
-            return None
-
-        sma = close.rolling(sma_period).mean().iloc[-1]
-        atr = wilder_atr(high, low, close, atr_period).iloc[-1]
-
-        if pd.isna(sma) or pd.isna(atr) or float(atr) == 0 or float(sma) == 0:
-            return None
-
-        # ── SMA sanity check against TV ground truth ─────────────────────────
-        # If yfinance SMA50 diverges >20% from TV's SMA50, the historical
-        # data series is corrupted (aliased ticker, bad corporate action, etc).
-        # Fall back to TV's SMA50 so the multiple stays chart-accurate.
-        if tv_sma50 and tv_sma50 > 0:
-            sma_divergence = abs(float(sma) - tv_sma50) / tv_sma50
-            if sma_divergence > 0.20:
-                # yfinance data is unreliable — reject this ticker entirely
-                return None
-
-        # ── Correct formula matching jfsrev/fred6724 TradingView script ─────
-        #   A = ATR%           = $ ATR / $ Last Done Price
-        #   B = % Gain from SMA = (Close - SMA50) / SMA50
-        #   Multiple = B / A  (NOT dollar-distance (Close-SMA)/ATR)
-        atr_pct  = float(atr) / last_close                      # A
-        pct_sma  = (last_close - float(sma)) / float(sma)       # B (decimal)
-        atr_mult = pct_sma / atr_pct                            # B / A
-
-        atr_pct_disp = round(atr_pct * 100, 2)   # e.g. 2.82
-        pct_sma_disp = round(pct_sma * 100, 1)   # e.g. 14.5
-
-        if atr_mult < min_atr_mult:
-            return None
-
-        prev    = float(close.iloc[-2]) if len(close) > 1 else last_close
-        day_chg = (last_close - prev) / prev * 100
-
-        def _fmt_vol(v):
-            if v >= 1_000_000: return f"{v/1_000_000:.1f}M"
-            if v >= 1_000:     return f"{v/1_000:.0f}K"
-            return str(int(v))
-
-        return {
-            "ticker":      ticker,
-            "price":       round(last_close, 2),
-            "atr_mult":    round(atr_mult, 2),
-            "tv_atr_mult": round(candidate["tv_atr_mult"], 2),
-            "sma":         round(float(sma), 2),
-            "atr":         round(float(atr), 2),
-            "atr_pct":     atr_pct_disp,
-            "pct_sma":     pct_sma_disp,
-            "day_chg":     round(day_chg, 2),
-            "avg_vol":     _fmt_vol(avg_vol),
-            "is_etf":      candidate["is_etf"],
-            "exchange":    candidate["exchange"],
-        }
-    except Exception:
+    # Guard: need valid TV values to compute the multiple
+    if tv_close <= 0 or tv_sma50 <= 0 or tv_atr <= 0:
+        return None
+    if tv_close < min_price:
         return None
 
+    # ── Correct formula: jfsrev/fred6724 script ──────────────────────────────
+    #   A = ATR%           = TV_ATR / TV_Close
+    #   B = % gain from SMA = (TV_Close - TV_SMA50) / TV_SMA50
+    #   Multiple = B / A
+    atr_pct  = tv_atr / tv_close                         # A
+    pct_sma  = (tv_close - tv_sma50) / tv_sma50          # B (decimal)
 
+    if atr_pct == 0:
+        return None
+
+    atr_mult = pct_sma / atr_pct                         # B / A
+
+    if atr_mult < min_atr_mult:
+        return None
+
+    # ── yfinance: avg volume + day change only ────────────────────────────────
+    avg_vol  = None
+    day_chg  = None
+
+    try:
+        df = yf.download(ticker, period="1mo", interval="1d",
+                         progress=False, auto_adjust=False)
+        if not df.empty:
+            if isinstance(df.columns, pd.MultiIndex):
+                df.columns = df.columns.get_level_values(0)
+            close_col = "Close" if "Close" in df.columns else "Adj Close"
+            if close_col in df.columns and "Volume" in df.columns:
+                closes  = df[close_col].squeeze().dropna()
+                volumes = df["Volume"].squeeze()
+                if len(closes) >= 2:
+                    prev    = float(closes.iloc[-2])
+                    last_yf = float(closes.iloc[-1])
+                    if prev > 0:
+                        day_chg = round((last_yf - prev) / prev * 100, 2)
+                if len(volumes) >= 5:
+                    avg_vol = float(volumes.tail(20).mean())
+    except Exception:
+        pass
+
+    # Fallback values if yfinance failed
+    if avg_vol is None or avg_vol < min_vol:
+        # Can't confirm volume — still include if TV data is solid
+        avg_vol_display = "N/A"
+    else:
+        if avg_vol >= 1_000_000:
+            avg_vol_display = f"{avg_vol/1_000_000:.1f}M"
+        elif avg_vol >= 1_000:
+            avg_vol_display = f"{avg_vol/1_000:.0f}K"
+        else:
+            avg_vol_display = str(int(avg_vol))
+
+    if day_chg is None:
+        day_chg = 0.0
+
+    return {
+        "ticker":      ticker,
+        "price":       round(tv_close, 2),
+        "atr_mult":    round(atr_mult, 2),
+        "tv_atr_mult": round(candidate["tv_atr_mult"], 2),
+        "sma":         round(tv_sma50, 2),
+        "atr":         round(tv_atr, 2),
+        "atr_pct":     round(atr_pct * 100, 2),
+        "pct_sma":     round(pct_sma * 100, 1),
+        "day_chg":     day_chg,
+        "avg_vol":     avg_vol_display,
+        "is_etf":      candidate["is_etf"],
+        "exchange":    candidate["exchange"],
+    }
 def run_two_phase_scan(min_price, min_atr_mult, sma_period, atr_period,
                        asset_filter, exchange_filter, workers, min_vol,
                        phase1_status_cb, phase2_progress_cb):
