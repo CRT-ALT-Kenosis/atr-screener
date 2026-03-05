@@ -168,6 +168,22 @@ html, body, [class*="css"], .stApp {
 .tag-etf   { background:rgba(52,211,153,.08);  color:var(--green); border:1px solid rgba(52,211,153,.2); }
 .tag-stock { background:rgba(96,165,250,.08);  color:var(--blue);  border:1px solid rgba(96,165,250,.2); }
 .tag-exch  { background:rgba(100,116,139,.08); color:var(--muted); border:1px solid var(--line); }
+.tag-day1  { background:rgba(248,113,113,.12); color:var(--red);   border:1px solid rgba(248,113,113,.3); }
+.tag-streak{ background:rgba(245,158,11,.10);  color:var(--amber); border:1px solid rgba(245,158,11,.25); }
+.tag-rvol  { background:rgba(96,165,250,.10);  color:var(--blue);  border:1px solid rgba(96,165,250,.25); }
+
+/* Qullamaggie signal row */
+.signal-row {
+  display:grid; grid-template-columns:repeat(3,1fr); gap:0.35rem;
+  margin-top:0.55rem; padding-top:0.55rem; border-top:1px solid var(--line);
+}
+.sig-cell { text-align:center; }
+.sig-label { font-family:'Geist Mono',monospace; font-size:0.52rem; color:var(--dim);
+             letter-spacing:0.08em; text-transform:uppercase; display:block; }
+.sig-val   { font-family:'Geist Mono',monospace; font-size:0.78rem; font-weight:600; color:var(--text); }
+.sig-val.pos { color:var(--green); }
+.sig-val.neg { color:var(--red); }
+.sig-val.warn{ color:var(--amber); }
 
 .empty-state { text-align: center; padding: 4rem 1rem; font-family: 'Geist Mono', monospace; color: var(--dim); }
 .empty-icon  { font-size: 2.4rem; margin-bottom: 0.8rem; opacity: .35; }
@@ -261,7 +277,8 @@ def phase1_tradingview(min_price: float, min_vol: int, prescreen_mult: float,
         q = (
             Query()
             .set_markets("america")
-            .select("name", "close", "SMA50", "ATR", "volume", "type", "exchange")
+            .select("name", "close", "SMA50", "ATR", "volume", "type", "exchange",
+                     "Perf.5D", "Perf.1M", "relative_volume_10d_calc", "change", "gap")
             .where(
                 Column("close") > min_price,
                 Column("volume") > min_vol,
@@ -309,6 +326,12 @@ def phase1_tradingview(min_price: float, min_vol: int, prescreen_mult: float,
 
     df = df.dropna(subset=["close", "SMA50", "ATR"])
     df = df[df["ATR"] > 0]
+    # Fill optional fields with safe defaults
+    for col in ["Perf.5D", "Perf.1M", "relative_volume_10d_calc", "change", "gap"]:
+        if col not in df.columns:
+            df[col] = 0.0
+    df = df.fillna({"Perf.5D": 0.0, "Perf.1M": 0.0,
+                    "relative_volume_10d_calc": 1.0, "change": 0.0, "gap": 0.0})
 
     # Compute rough ATR multiple using the correct jfsrev/fred6724 formula:
     #   A = ATR% = ATR / Close
@@ -325,9 +348,13 @@ def phase1_tradingview(min_price: float, min_vol: int, prescreen_mult: float,
     df["is_etf"] = df["type"].isin(["fund", "etf", "dr"])
 
     return (
-        df[["name", "close", "SMA50", "ATR", "tv_atr_mult", "exchange", "is_etf"]]
+        df[["name", "close", "SMA50", "ATR", "tv_atr_mult", "exchange", "is_etf",
+            "Perf.5D", "Perf.1M", "relative_volume_10d_calc", "change", "gap"]]
         .rename(columns={"name": "ticker", "close": "tv_close",
-                         "SMA50": "tv_sma50", "ATR": "tv_atr"})
+                         "SMA50": "tv_sma50", "ATR": "tv_atr",
+                         "Perf.5D": "gain_5d", "Perf.1M": "gain_1m",
+                         "relative_volume_10d_calc": "rel_vol",
+                         "change": "tv_day_chg", "gap": "tv_gap"})
         .to_dict("records"),
         None,
     )
@@ -378,12 +405,13 @@ def phase2_confirm(candidate: dict, sma_period: int, atr_period: int,
     if atr_mult < min_atr_mult:
         return None
 
-    # ── yfinance: avg volume + day change only ────────────────────────────────
-    avg_vol  = None
-    day_chg  = None
+    # ── yfinance: avg volume + day change + consecutive green days ───────────
+    avg_vol     = None
+    day_chg     = None
+    consec_days = 0   # consecutive green closes
 
     try:
-        df = yf.download(ticker, period="1mo", interval="1d",
+        df = yf.download(ticker, period="3mo", interval="1d",
                          progress=False, auto_adjust=False)
         if not df.empty:
             if isinstance(df.columns, pd.MultiIndex):
@@ -399,12 +427,18 @@ def phase2_confirm(candidate: dict, sma_period: int, atr_period: int,
                         day_chg = round((last_yf - prev) / prev * 100, 2)
                 if len(volumes) >= 5:
                     avg_vol = float(volumes.tail(20).mean())
+                # Consecutive green days (close > prior close)
+                if len(closes) >= 2:
+                    for i in range(len(closes) - 1, 0, -1):
+                        if float(closes.iloc[i]) > float(closes.iloc[i - 1]):
+                            consec_days += 1
+                        else:
+                            break
     except Exception:
         pass
 
     # Fallback values if yfinance failed
     if avg_vol is None or avg_vol < min_vol:
-        # Can't confirm volume — still include if TV data is solid
         avg_vol_display = "N/A"
     else:
         if avg_vol >= 1_000_000:
@@ -415,7 +449,7 @@ def phase2_confirm(candidate: dict, sma_period: int, atr_period: int,
             avg_vol_display = str(int(avg_vol))
 
     if day_chg is None:
-        day_chg = 0.0
+        day_chg = candidate.get("tv_day_chg", 0.0)
 
     return {
         "ticker":      ticker,
@@ -430,10 +464,18 @@ def phase2_confirm(candidate: dict, sma_period: int, atr_period: int,
         "avg_vol":     avg_vol_display,
         "is_etf":      candidate["is_etf"],
         "exchange":    candidate["exchange"],
+        # Qullamaggie parabolic short signal fields
+        "consec_days": consec_days,
+        "gain_5d":     round(float(candidate.get("gain_5d") or 0), 1),
+        "gain_1m":     round(float(candidate.get("gain_1m") or 0), 1),
+        "rel_vol":     round(float(candidate.get("rel_vol") or 1.0), 2),
+        "tv_gap":      round(float(candidate.get("tv_gap")  or 0), 2),
+        "is_day1":     consec_days <= 1,   # Qullamaggie: never short day 1
     }
 def run_two_phase_scan(min_price, min_atr_mult, sma_period, atr_period,
                        asset_filter, exchange_filter, workers, min_vol,
-                       mcap_tiers, phase1_status_cb, phase2_progress_cb):
+                       mcap_tiers, min_consec_days, min_gain_5d, min_rel_vol,
+                       hide_day1, phase1_status_cb, phase2_progress_cb):
     """
     Full two-phase scan.
     phase1_status_cb(msg, n_candidates) — called once after Phase 1 completes.
@@ -469,6 +511,16 @@ def run_two_phase_scan(min_price, min_atr_mult, sma_period, atr_period,
             res = fut.result()
             if res:
                 results.append(res)
+
+    # ── Post-scan Qullamaggie filters ─────────────────────────────────────────
+    if hide_day1:
+        results = [r for r in results if not r["is_day1"]]
+    if min_consec_days > 0:
+        results = [r for r in results if r["consec_days"] >= min_consec_days]
+    if min_gain_5d > 0:
+        results = [r for r in results if r["gain_5d"] >= min_gain_5d]
+    if min_rel_vol > 0:
+        results = [r for r in results if r["rel_vol"] >= min_rel_vol]
 
     return sorted(results, key=lambda x: x["atr_mult"], reverse=True)
 
@@ -527,6 +579,26 @@ with st.sidebar:
     min_vol = st.number_input(
         "Min Avg Volume", value=500_000, step=100_000, min_value=0,
         help="Filters warrants, ghost tickers, and illiquid symbols",
+    )
+
+    st.markdown('<span class="sec-label">Qullamaggie Filters</span>', unsafe_allow_html=True)
+    hide_day1 = st.toggle(
+        "Hide Day 1 setups",
+        value=True,
+        help="Qullamaggie never shorts day 1 — too erratic. Hides stocks where streak = 1.",
+    )
+    min_consec_days = st.slider(
+        "Min consecutive green days", 0, 7, 3,
+        help="Qullamaggie requires 3–5+ days up in a row before considering a short.",
+        label_visibility="visible",
+    )
+    min_gain_5d = st.number_input(
+        "Min 5-day gain (%)", value=0.0, step=5.0, min_value=0.0,
+        help="Large caps need 50–100%+ in days/weeks. Small caps 300–1000%+.",
+    )
+    min_rel_vol = st.number_input(
+        "Min Relative Volume", value=1.0, step=0.5, min_value=0.0,
+        help="High rel vol (1.5–3×+) confirms the parabolic is real, not drift.",
     )
 
     st.markdown('<span class="sec-label">Performance</span>', unsafe_allow_html=True)
@@ -631,6 +703,8 @@ if run_btn:
         asset_filter, exchange_filter,
         workers, int(min_vol),
         mcap_tiers,
+        int(min_consec_days), float(min_gain_5d), float(min_rel_vol),
+        hide_day1,
         phase1_cb, phase2_cb,
     )
 
@@ -757,20 +831,26 @@ if "results" in st.session_state:
       <span class="stat-v">{r['avg_vol']}</span>
     </div>
   </div>
-  <div class="atr-compare">
-    <div class="atr-compare-item">
-      <span class="atr-compare-label">TV ATR×</span>
-      <span class="atr-compare-val">{r['tv_atr_mult']}×</span>
+  <div class="signal-row">
+    <div class="sig-cell">
+      <span class="sig-label">5D Gain</span>
+      <span class="sig-val {'pos' if r['gain_5d']>=0 else 'neg'}">{'+' if r['gain_5d']>=0 else ''}{r['gain_5d']}%</span>
     </div>
-    <span class="atr-compare-sep">→</span>
-    <div class="atr-compare-item">
-      <span class="atr-compare-label">Confirmed ATR×</span>
-      <span class="atr-compare-val">{r['atr_mult']}×</span>
+    <div class="sig-cell">
+      <span class="sig-label">Rel Vol</span>
+      <span class="sig-val {'warn' if r['rel_vol']>=2 else ''}">{r['rel_vol']}×</span>
+    </div>
+    <div class="sig-cell">
+      <span class="sig-label">Streak</span>
+      <span class="sig-val warn">{r['consec_days']}d ↑</span>
     </div>
   </div>
   <div class="card-tags">
     <span class="tag {type_cls}">{type_lbl}</span>
     <span class="tag tag-exch">{r['exchange']}</span>
+    {'<span class="tag tag-day1">⚠ DAY 1</span>' if r['is_day1'] else ''}
+    {'<span class="tag tag-streak">🔥 ' + str(r['consec_days']) + 'd</span>' if r['consec_days'] >= 3 else ''}
+    {'<span class="tag tag-rvol">RVOL ' + str(r['rel_vol']) + '×</span>' if r['rel_vol'] >= 1.5 else ''}
   </div>
 </div>
 """, unsafe_allow_html=True)
@@ -789,6 +869,12 @@ if "results" in st.session_state:
                 "pct_sma":     "% Above SMA (B)",
                 "day_chg":     "Day Chg %",
                 "avg_vol":     "Avg Volume",
+                "consec_days": "Streak (days)",
+                "gain_5d":     "5D Gain %",
+                "gain_1m":     "1M Gain %",
+                "rel_vol":     "Rel Vol",
+                "tv_gap":      "Gap %",
+                "is_day1":     "Day 1?",
             })
             st.dataframe(disp, use_container_width=True, hide_index=True)
 
