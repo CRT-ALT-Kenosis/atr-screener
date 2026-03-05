@@ -1243,7 +1243,7 @@ def _run_phase_ui(scan_fn, scan_kwargs, state_key):
   <span class="phase-label">Querying <b>TradingView</b>…</span>
 </div>""", unsafe_allow_html=True)
 
-    results = scan_fn(**scan_kwargs, p1_cb=p1_cb, p2_cb=p2_cb)
+    results = scan_fn(p1_cb, p2_cb) if not scan_kwargs else scan_fn(**scan_kwargs, p1_cb=p1_cb, p2_cb=p2_cb)
     ph2p.empty(); ph2i.empty()
     ph2b.markdown(f"""
 <div class="phase-banner">
@@ -1335,11 +1335,14 @@ Also elevated: {others_txt}
 
     if run_ps:
         results_ps = _run_phase_ui(
-            run_two_phase_scan,
-            dict(min_price=min_price, min_atr_mult=min_atr_mult,
-                 sma_period=int(sma_period), atr_period=int(atr_period),
-                 asset_filter=asset_filter, exchange_filter=exchange_filter,
-                 workers=workers, min_vol=int(min_vol), mcap_tiers=mcap_tiers),
+            lambda p1_cb, p2_cb: run_two_phase_scan(
+                min_price, min_atr_mult,
+                int(sma_period), int(atr_period),
+                asset_filter, exchange_filter,
+                workers, int(min_vol), mcap_tiers,
+                p1_cb, p2_cb,
+            ),
+            {},
             "results_ps",
         )
 
@@ -1471,10 +1474,11 @@ with tab_ep:
 
     if run_ep:
         results_ep = _run_phase_ui(
-            run_ep_scan,
-            dict(min_gap_pct=min_gap_ep, min_price=min_price,
-                 asset_filter=asset_filter, exchange_filter=exchange_filter,
-                 min_vol=int(min_vol), mcap_tiers=mcap_tiers, workers=workers),
+            lambda p1_cb, p2_cb: run_ep_scan(
+                min_gap_ep, min_price, asset_filter, exchange_filter,
+                int(min_vol), mcap_tiers, workers, p1_cb, p2_cb,
+            ),
+            {},
             "results_ep",
         )
 
@@ -1596,10 +1600,11 @@ with tab_bo:
 
     if run_bo:
         results_bo = _run_phase_ui(
-            run_breakout_scan,
-            dict(min_perf_1m=min_perf_bo, min_price=min_price,
-                 asset_filter=asset_filter, exchange_filter=exchange_filter,
-                 min_vol=int(min_vol), mcap_tiers=mcap_tiers, workers=workers),
+            lambda p1_cb, p2_cb: run_breakout_scan(
+                min_perf_bo, min_price, asset_filter, exchange_filter,
+                int(min_vol), mcap_tiers, workers, p1_cb, p2_cb,
+            ),
+            {},
             "results_bo",
         )
 
@@ -2117,4 +2122,3 @@ with tab_guide:
 <span>— Kristjan Kullamägi</span>
 </div>
 """, unsafe_allow_html=True)
-
