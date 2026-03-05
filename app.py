@@ -6,18 +6,24 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 
 # ─────────────────────────────────────────────────────────────────────────────
+
 st.set_page_config(
-    page_title="ATR Screener",
-    page_icon="◈",
-    layout="wide",
-    initial_sidebar_state="expanded",
+page_title=“ATR Screener”,
+page_icon=“◈”,
+layout=“wide”,
+initial_sidebar_state=“expanded”,
 )
 
 # ─────────────────────────────────────────────────────────────────────────────
-#  DESIGN SYSTEM — refined institutional terminal
-#  Deep slate · warm amber accents · Geist Mono + DM Sans
+
+# DESIGN SYSTEM — refined institutional terminal
+
+# Deep slate · warm amber accents · Geist Mono + DM Sans
+
 # ─────────────────────────────────────────────────────────────────────────────
-st.markdown("""
+
+st.markdown(”””
+
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Geist+Mono:wght@300;400;500;600;700&family=DM+Sans:wght@300;400;500;600&display=swap');
 
@@ -310,45 +316,48 @@ header[data-testid="stHeader"] { background: transparent !important; }
 ::-webkit-scrollbar-track { background: var(--bg0); }
 ::-webkit-scrollbar-thumb { background: var(--line2); border-radius: 3px; }
 </style>
-""", unsafe_allow_html=True)
 
+“””, unsafe_allow_html=True)
 
 # ─────────────────────────────────────────────────────────────────────────────
-#  SCAN ENGINE — TWO-PHASE
+
+# SCAN ENGINE — TWO-PHASE
+
 # ─────────────────────────────────────────────────────────────────────────────
 
 # TradingView exchange name mapping
+
 TV_EXCHANGE_MAP = {
-    "NASDAQ":        "NASDAQ",
-    "NYSE":          "NYSE",
-    "NYSE Arca":     "AMEX",   # TV calls NYSE Arca "AMEX"
-    "NYSE American": "AMEX",
-    "BATS":          "BATS",
-    "IEX":           None,     # not in TV screener
+“NASDAQ”:        “NASDAQ”,
+“NYSE”:          “NYSE”,
+“NYSE Arca”:     “AMEX”,   # TV calls NYSE Arca “AMEX”
+“NYSE American”: “AMEX”,
+“BATS”:          “BATS”,
+“IEX”:           None,     # not in TV screener
 }
 
-
 # Exchange → TradingView symbol prefix
+
 TV_PREFIX = {
-    "NASDAQ":        "NASDAQ",
-    "NYSE":          "NYSE",
-    "NYSE Arca":     "AMEX",
-    "NYSE American": "AMEX",
-    "AMEX":          "AMEX",
-    "BATS":          "BATS",
-    "IEX":           "NYSE",   # fallback
+“NASDAQ”:        “NASDAQ”,
+“NYSE”:          “NYSE”,
+“NYSE Arca”:     “AMEX”,
+“NYSE American”: “AMEX”,
+“AMEX”:          “AMEX”,
+“BATS”:          “BATS”,
+“IEX”:           “NYSE”,   # fallback
 }
 
 def tv_symbol(ticker: str, exchange: str) -> str:
-    prefix = TV_PREFIX.get(exchange, "NYSE")
-    return f"{prefix}:{ticker}"
+prefix = TV_PREFIX.get(exchange, “NYSE”)
+return f”{prefix}:{ticker}”
 
+def render_tv_chart(ticker: str, exchange: str, theme: str = “dark”) -> str:
+“”“Return self-contained HTML for a TradingView Advanced Chart widget.”””
+sym      = tv_symbol(ticker, exchange)
+cid      = f”tv_{ticker.replace(’.’, ‘_’)}”
+return f”””
 
-def render_tv_chart(ticker: str, exchange: str, theme: str = "dark") -> str:
-    """Return self-contained HTML for a TradingView Advanced Chart widget."""
-    sym      = tv_symbol(ticker, exchange)
-    cid      = f"tv_{ticker.replace('.', '_')}"
-    return f"""
 <div id="{cid}" style="height:520px;border-radius:6px;overflow:hidden;"></div>
 <script src="https://s3.tradingview.com/tv.js"></script>
 <script>
@@ -392,1020 +401,1047 @@ new TradingView.widget({{
 </script>
 """
 
-
 # Market cap tier definitions (USD)
+
 MCAP_TIERS = {
-    "All":        (0,             None),
-    "Micro":      (0,             300_000_000),
-    "Small":      (300_000_000,   2_000_000_000),
-    "Mid":        (2_000_000_000, 10_000_000_000),
-    "Large":      (10_000_000_000,200_000_000_000),
-    "Mega":       (200_000_000_000, None),
+“All”:        (0,             None),
+“Micro”:      (0,             300_000_000),
+“Small”:      (300_000_000,   2_000_000_000),
+“Mid”:        (2_000_000_000, 10_000_000_000),
+“Large”:      (10_000_000_000,200_000_000_000),
+“Mega”:       (200_000_000_000, None),
 }
 
 def phase1_tradingview(min_price: float, min_vol: int, prescreen_mult: float,
-                       asset_filter: str, exchange_filter: list,
-                       mcap_tiers: list | None = None) -> tuple[list, str | None]:
-    """
-    Phase 1 — TradingView scanner API.
-    Single fast call covering all US exchanges. Returns candidate dicts.
-    Uses an 80% pre-screen threshold to avoid missing boundary cases.
-    """
-    try:
-        from tradingview_screener import Query, Column
-    except ImportError:
-        return [], "tradingview-screener not installed"
+asset_filter: str, exchange_filter: list,
+mcap_tiers: list | None = None) -> tuple[list, str | None]:
+“””
+Phase 1 — TradingView scanner API.
+Single fast call covering all US exchanges. Returns candidate dicts.
+Uses an 80% pre-screen threshold to avoid missing boundary cases.
+“””
+try:
+from tradingview_screener import Query, Column
+except ImportError:
+return [], “tradingview-screener not installed”
 
-    # Map exchange selections to TV names (deduplicated, None filtered)
-    tv_exchanges = list({TV_EXCHANGE_MAP[e] for e in exchange_filter
-                         if e in TV_EXCHANGE_MAP and TV_EXCHANGE_MAP[e]})
+```
+# Map exchange selections to TV names (deduplicated, None filtered)
+tv_exchanges = list({TV_EXCHANGE_MAP[e] for e in exchange_filter
+                     if e in TV_EXCHANGE_MAP and TV_EXCHANGE_MAP[e]})
 
-    try:
-        q = (
-            Query()
-            .set_markets("america")
-            .select("name", "close", "SMA50", "ATR", "volume", "type", "exchange",
-                     "Perf.5D", "Perf.1M", "relative_volume_10d_calc", "change", "gap")
-            .where(
-                Column("close") > min_price,
-                Column("volume") > min_vol,
-                Column("close") > Column("SMA50"),  # must be above SMA to have positive multiple
-            )
-            .order_by("volume", ascending=False)
-            .limit(2000)
+try:
+    q = (
+        Query()
+        .set_markets("america")
+        .select("name", "close", "SMA50", "ATR", "volume", "type", "exchange",
+                 "Perf.5D", "Perf.1M", "relative_volume_10d_calc", "change", "gap")
+        .where(
+            Column("close") > min_price,
+            Column("volume") > min_vol,
+            Column("close") > Column("SMA50"),  # must be above SMA to have positive multiple
         )
-
-        if asset_filter == "ETFs Only":
-            q = q.where(Column("type").isin(["fund", "etf"]))
-        elif asset_filter == "Stocks Only":
-            q = q.where(Column("type") == "stock")
-
-        if tv_exchanges:
-            q = q.where(Column("exchange").isin(tv_exchanges))
-
-        # Market cap tier filter — apply each selected tier as an OR block
-        if mcap_tiers and "All" not in mcap_tiers:
-            from tradingview_screener import Or
-            cap_conditions = []
-            for tier in mcap_tiers:
-                lo, hi = MCAP_TIERS.get(tier, (0, None))
-                if lo and hi:
-                    cap_conditions.append(
-                        (Column("market_cap_basic") >= lo) & (Column("market_cap_basic") < hi)
-                    )
-                elif lo:
-                    cap_conditions.append(Column("market_cap_basic") >= lo)
-                elif hi:
-                    cap_conditions.append(Column("market_cap_basic") < hi)
-            if cap_conditions:
-                combined = cap_conditions[0]
-                for c in cap_conditions[1:]:
-                    combined = combined | c
-                q = q.where(combined)
-
-        _, df = q.get_scanner_data()
-
-    except Exception as e:
-        return [], f"TradingView API error: {e}"
-
-    if df is None or df.empty:
-        return [], None
-
-    df = df.dropna(subset=["close", "SMA50", "ATR"])
-    df = df[df["ATR"] > 0]
-    # Fill optional fields with safe defaults
-    for col in ["Perf.5D", "Perf.1M", "relative_volume_10d_calc", "change", "gap"]:
-        if col not in df.columns:
-            df[col] = 0.0
-    df = df.fillna({"Perf.5D": 0.0, "Perf.1M": 0.0,
-                    "relative_volume_10d_calc": 1.0, "change": 0.0, "gap": 0.0})
-
-    # Compute rough ATR multiple using the correct jfsrev/fred6724 formula:
-    #   A = ATR% = ATR / Close
-    #   B = % gain from SMA50 = (Close - SMA50) / SMA50
-    #   Multiple = B / A
-    df["tv_atr_mult"] = ((df["close"] - df["SMA50"]) / df["SMA50"]) / (df["ATR"] / df["close"])
-
-    # Pre-filter at 80% of threshold — catches exact-boundary cases
-    df = df[df["tv_atr_mult"] >= prescreen_mult]
-
-    if df.empty:
-        return [], None
-
-    df["is_etf"] = df["type"].isin(["fund", "etf", "dr"])
-
-    return (
-        df[["name", "close", "SMA50", "ATR", "tv_atr_mult", "exchange", "is_etf",
-            "Perf.5D", "Perf.1M", "relative_volume_10d_calc", "change", "gap"]]
-        .rename(columns={"name": "ticker", "close": "tv_close",
-                         "SMA50": "tv_sma50", "ATR": "tv_atr",
-                         "Perf.5D": "gain_5d", "Perf.1M": "gain_1m",
-                         "relative_volume_10d_calc": "rel_vol",
-                         "change": "tv_day_chg", "gap": "tv_gap"})
-        .to_dict("records"),
-        None,
+        .order_by("volume", ascending=False)
+        .limit(2000)
     )
 
+    if asset_filter == "ETFs Only":
+        q = q.where(Column("type").isin(["fund", "etf"]))
+    elif asset_filter == "Stocks Only":
+        q = q.where(Column("type") == "stock")
+
+    if tv_exchanges:
+        q = q.where(Column("exchange").isin(tv_exchanges))
+
+    # Market cap tier filter — apply each selected tier as an OR block
+    if mcap_tiers and "All" not in mcap_tiers:
+        from tradingview_screener import Or
+        cap_conditions = []
+        for tier in mcap_tiers:
+            lo, hi = MCAP_TIERS.get(tier, (0, None))
+            if lo and hi:
+                cap_conditions.append(
+                    (Column("market_cap_basic") >= lo) & (Column("market_cap_basic") < hi)
+                )
+            elif lo:
+                cap_conditions.append(Column("market_cap_basic") >= lo)
+            elif hi:
+                cap_conditions.append(Column("market_cap_basic") < hi)
+        if cap_conditions:
+            combined = cap_conditions[0]
+            for c in cap_conditions[1:]:
+                combined = combined | c
+            q = q.where(combined)
+
+    _, df = q.get_scanner_data()
+
+except Exception as e:
+    return [], f"TradingView API error: {e}"
+
+if df is None or df.empty:
+    return [], None
+
+df = df.dropna(subset=["close", "SMA50", "ATR"])
+df = df[df["ATR"] > 0]
+# Fill optional fields with safe defaults
+for col in ["Perf.5D", "Perf.1M", "relative_volume_10d_calc", "change", "gap"]:
+    if col not in df.columns:
+        df[col] = 0.0
+df = df.fillna({"Perf.5D": 0.0, "Perf.1M": 0.0,
+                "relative_volume_10d_calc": 1.0, "change": 0.0, "gap": 0.0})
+
+# Compute rough ATR multiple using the correct jfsrev/fred6724 formula:
+#   A = ATR% = ATR / Close
+#   B = % gain from SMA50 = (Close - SMA50) / SMA50
+#   Multiple = B / A
+df["tv_atr_mult"] = ((df["close"] - df["SMA50"]) / df["SMA50"]) / (df["ATR"] / df["close"])
+
+# Pre-filter at 80% of threshold — catches exact-boundary cases
+df = df[df["tv_atr_mult"] >= prescreen_mult]
+
+if df.empty:
+    return [], None
+
+df["is_etf"] = df["type"].isin(["fund", "etf", "dr"])
+
+return (
+    df[["name", "close", "SMA50", "ATR", "tv_atr_mult", "exchange", "is_etf",
+        "Perf.5D", "Perf.1M", "relative_volume_10d_calc", "change", "gap"]]
+    .rename(columns={"name": "ticker", "close": "tv_close",
+                     "SMA50": "tv_sma50", "ATR": "tv_atr",
+                     "Perf.5D": "gain_5d", "Perf.1M": "gain_1m",
+                     "relative_volume_10d_calc": "rel_vol",
+                     "change": "tv_day_chg", "gap": "tv_gap"})
+    .to_dict("records"),
+    None,
+)
+```
 
 def wilder_atr(high: pd.Series, low: pd.Series, close: pd.Series, period: int = 14) -> pd.Series:
-    tr = pd.concat([
-        high - low,
-        (high - close.shift()).abs(),
-        (low  - close.shift()).abs(),
-    ], axis=1).max(axis=1)
-    return tr.ewm(alpha=1 / period, min_periods=period, adjust=False).mean()
-
+tr = pd.concat([
+high - low,
+(high - close.shift()).abs(),
+(low  - close.shift()).abs(),
+], axis=1).max(axis=1)
+return tr.ewm(alpha=1 / period, min_periods=period, adjust=False).mean()
 
 # Sector ETF proxies — liquid, covers all 11 GICS sectors
+
 SECTOR_ETFS = {
-    "Technology":       "XLK",
-    "Healthcare":       "XLV",
-    "Financials":       "XLF",
-    "Consumer Disc":    "XLY",
-    "Industrials":      "XLI",
-    "Communication":    "XLC",
-    "Consumer Staples": "XLP",
-    "Energy":           "XLE",
-    "Utilities":        "XLU",
-    "Real Estate":      "XLRE",
-    "Materials":        "XLB",
+“Technology”:       “XLK”,
+“Healthcare”:       “XLV”,
+“Financials”:       “XLF”,
+“Consumer Disc”:    “XLY”,
+“Industrials”:      “XLI”,
+“Communication”:    “XLC”,
+“Consumer Staples”: “XLP”,
+“Energy”:           “XLE”,
+“Utilities”:        “XLU”,
+“Real Estate”:      “XLRE”,
+“Materials”:        “XLB”,
 }
 
 @st.cache_data(ttl=900)   # 15-min cache
 def fetch_sector_heatmap(sma_period: int = 50, atr_period: int = 14) -> list[dict]:
-    """
-    Fetch OHLCV for each sector ETF, compute ATR× extension,
-    return sorted list for heatmap display.
-    """
-    results = []
-    tickers = list(SECTOR_ETFS.values())
+“””
+Fetch OHLCV for each sector ETF, compute ATR× extension,
+return sorted list for heatmap display.
+“””
+results = []
+tickers = list(SECTOR_ETFS.values())
+try:
+raw = yf.download(tickers, period=“6mo”, interval=“1d”,
+progress=False, auto_adjust=False, group_by=“ticker”)
+except Exception:
+return []
+
+```
+sector_name = {v: k for k, v in SECTOR_ETFS.items()}
+
+for etf in tickers:
     try:
-        raw = yf.download(tickers, period="6mo", interval="1d",
-                          progress=False, auto_adjust=False, group_by="ticker")
-    except Exception:
-        return []
+        if isinstance(raw.columns, pd.MultiIndex):
+            df = raw[etf].dropna(how="all")
+        else:
+            df = raw.dropna(how="all")
 
-    sector_name = {v: k for k, v in SECTOR_ETFS.items()}
-
-    for etf in tickers:
-        try:
-            if isinstance(raw.columns, pd.MultiIndex):
-                df = raw[etf].dropna(how="all")
-            else:
-                df = raw.dropna(how="all")
-
-            close = df["Close"].squeeze().dropna()
-            high  = df["High"].squeeze()
-            low   = df["Low"].squeeze()
-            if len(close) < sma_period + 5:
-                continue
-
-            last  = float(close.iloc[-1])
-            sma   = float(close.rolling(sma_period).mean().iloc[-1])
-            atr   = float(wilder_atr(high, low, close, atr_period).iloc[-1])
-
-            if sma <= 0 or atr <= 0 or last <= 0:
-                continue
-
-            atr_pct  = atr / last
-            pct_sma  = (last - sma) / sma
-            if atr_pct == 0:
-                continue
-            mult = round(pct_sma / atr_pct, 2)
-
-            prev    = float(close.iloc[-2]) if len(close) > 1 else last
-            day_chg = round((last - prev) / prev * 100, 2)
-
-            results.append({
-                "sector":   sector_name.get(etf, etf),
-                "etf":      etf,
-                "price":    round(last, 2),
-                "mult":     mult,
-                "pct_sma":  round(pct_sma * 100, 1),
-                "atr_pct":  round(atr_pct * 100, 2),
-                "day_chg":  day_chg,
-                "sma":      round(sma, 2),
-            })
-        except Exception:
+        close = df["Close"].squeeze().dropna()
+        high  = df["High"].squeeze()
+        low   = df["Low"].squeeze()
+        if len(close) < sma_period + 5:
             continue
 
-    return sorted(results, key=lambda x: x["mult"], reverse=True)
+        last  = float(close.iloc[-1])
+        sma   = float(close.rolling(sma_period).mean().iloc[-1])
+        atr   = float(wilder_atr(high, low, close, atr_period).iloc[-1])
 
+        if sma <= 0 or atr <= 0 or last <= 0:
+            continue
+
+        atr_pct  = atr / last
+        pct_sma  = (last - sma) / sma
+        if atr_pct == 0:
+            continue
+        mult = round(pct_sma / atr_pct, 2)
+
+        prev    = float(close.iloc[-2]) if len(close) > 1 else last
+        day_chg = round((last - prev) / prev * 100, 2)
+
+        results.append({
+            "sector":   sector_name.get(etf, etf),
+            "etf":      etf,
+            "price":    round(last, 2),
+            "mult":     mult,
+            "pct_sma":  round(pct_sma * 100, 1),
+            "atr_pct":  round(atr_pct * 100, 2),
+            "day_chg":  day_chg,
+            "sma":      round(sma, 2),
+        })
+    except Exception:
+        continue
+
+return sorted(results, key=lambda x: x["mult"], reverse=True)
+```
 
 def sector_heat_class(mult: float) -> str:
-    if mult >= 10:  return "s-fire"
-    if mult >= 5:   return "s-hot"
-    if mult >= 2:   return "s-warm"
-    return "s-cold"
-
+if mult >= 10:  return “s-fire”
+if mult >= 5:   return “s-hot”
+if mult >= 2:   return “s-warm”
+return “s-cold”
 
 def sector_bar_color(mult: float) -> str:
-    if mult >= 10:  return "var(--red)"
-    if mult >= 5:   return "var(--amber)"
-    if mult >= 2:   return "var(--teal)"
-    return "var(--dim)"
-
+if mult >= 10:  return “var(–red)”
+if mult >= 5:   return “var(–amber)”
+if mult >= 2:   return “var(–teal)”
+return “var(–dim)”
 
 def sector_bar_pct(mult: float, max_mult: float = 20.0) -> int:
-    return min(int(max(mult, 0) / max_mult * 100), 100)
-
+return min(int(max(mult, 0) / max_mult * 100), 100)
 
 def phase2_confirm(candidate: dict, sma_period: int, atr_period: int,
-                   min_price: float, min_vol: int, min_atr_mult: float) -> dict | None:
-    """
-    Phase 2 — enrich TV candidates with yfinance volume + day change only.
+min_price: float, min_vol: int, min_atr_mult: float) -> dict | None:
+“””
+Phase 2 — enrich TV candidates with yfinance volume + day change only.
 
-    The ATR multiple is computed entirely from TV ground-truth values
-    (tv_close, tv_sma50, tv_atr) which already match the chart exactly.
-    yfinance is only used for avg_vol and day_chg — fields TV doesn't expose
-    in the screener API. If yfinance data is unusable we fall back to TV values.
-    """
-    ticker   = candidate["ticker"]
-    tv_close = float(candidate.get("tv_close") or 0)
-    tv_sma50 = float(candidate.get("tv_sma50") or 0)
-    tv_atr   = float(candidate.get("tv_atr")   or 0)
+```
+The ATR multiple is computed entirely from TV ground-truth values
+(tv_close, tv_sma50, tv_atr) which already match the chart exactly.
+yfinance is only used for avg_vol and day_chg — fields TV doesn't expose
+in the screener API. If yfinance data is unusable we fall back to TV values.
+"""
+ticker   = candidate["ticker"]
+tv_close = float(candidate.get("tv_close") or 0)
+tv_sma50 = float(candidate.get("tv_sma50") or 0)
+tv_atr   = float(candidate.get("tv_atr")   or 0)
 
-    # Guard: need valid TV values to compute the multiple
-    if tv_close <= 0 or tv_sma50 <= 0 or tv_atr <= 0:
-        return None
-    if tv_close < min_price:
-        return None
+# Guard: need valid TV values to compute the multiple
+if tv_close <= 0 or tv_sma50 <= 0 or tv_atr <= 0:
+    return None
+if tv_close < min_price:
+    return None
 
-    # ── Correct formula: jfsrev/fred6724 script ──────────────────────────────
-    #   A = ATR%           = TV_ATR / TV_Close
-    #   B = % gain from SMA = (TV_Close - TV_SMA50) / TV_SMA50
-    #   Multiple = B / A
-    atr_pct  = tv_atr / tv_close                         # A
-    pct_sma  = (tv_close - tv_sma50) / tv_sma50          # B (decimal)
+# ── Correct formula: jfsrev/fred6724 script ──────────────────────────────
+#   A = ATR%           = TV_ATR / TV_Close
+#   B = % gain from SMA = (TV_Close - TV_SMA50) / TV_SMA50
+#   Multiple = B / A
+atr_pct  = tv_atr / tv_close                         # A
+pct_sma  = (tv_close - tv_sma50) / tv_sma50          # B (decimal)
 
-    if atr_pct == 0:
-        return None
+if atr_pct == 0:
+    return None
 
-    atr_mult = pct_sma / atr_pct                         # B / A
+atr_mult = pct_sma / atr_pct                         # B / A
 
-    if atr_mult < min_atr_mult:
-        return None
+if atr_mult < min_atr_mult:
+    return None
 
-    # ── yfinance: avg volume + day change + consecutive green days ───────────
-    avg_vol     = None
-    day_chg     = None
-    consec_days = 0   # consecutive green closes
+# ── yfinance: avg volume + day change + consecutive green days ───────────
+avg_vol     = None
+day_chg     = None
+consec_days = 0   # consecutive green closes
 
-    try:
-        df = yf.download(ticker, period="3mo", interval="1d",
-                         progress=False, auto_adjust=False)
-        if not df.empty:
-            if isinstance(df.columns, pd.MultiIndex):
-                df.columns = df.columns.get_level_values(0)
-            close_col = "Close" if "Close" in df.columns else "Adj Close"
-            if close_col in df.columns and "Volume" in df.columns:
-                closes  = df[close_col].squeeze().dropna()
-                volumes = df["Volume"].squeeze()
-                if len(closes) >= 2:
-                    prev    = float(closes.iloc[-2])
-                    last_yf = float(closes.iloc[-1])
-                    if prev > 0:
-                        day_chg = round((last_yf - prev) / prev * 100, 2)
-                if len(volumes) >= 5:
-                    avg_vol = float(volumes.tail(20).mean())
-                # Consecutive green days (close > prior close)
-                if len(closes) >= 2:
-                    for i in range(len(closes) - 1, 0, -1):
-                        if float(closes.iloc[i]) > float(closes.iloc[i - 1]):
-                            consec_days += 1
-                        else:
-                            break
-    except Exception:
-        pass
+try:
+    df = yf.download(ticker, period="3mo", interval="1d",
+                     progress=False, auto_adjust=False)
+    if not df.empty:
+        if isinstance(df.columns, pd.MultiIndex):
+            df.columns = df.columns.get_level_values(0)
+        close_col = "Close" if "Close" in df.columns else "Adj Close"
+        if close_col in df.columns and "Volume" in df.columns:
+            closes  = df[close_col].squeeze().dropna()
+            volumes = df["Volume"].squeeze()
+            if len(closes) >= 2:
+                prev    = float(closes.iloc[-2])
+                last_yf = float(closes.iloc[-1])
+                if prev > 0:
+                    day_chg = round((last_yf - prev) / prev * 100, 2)
+            if len(volumes) >= 5:
+                avg_vol = float(volumes.tail(20).mean())
+            # Consecutive green days (close > prior close)
+            if len(closes) >= 2:
+                for i in range(len(closes) - 1, 0, -1):
+                    if float(closes.iloc[i]) > float(closes.iloc[i - 1]):
+                        consec_days += 1
+                    else:
+                        break
+except Exception:
+    pass
 
-    # Fallback values if yfinance failed
-    if avg_vol is None or avg_vol < min_vol:
-        avg_vol_display = "N/A"
+# Fallback values if yfinance failed
+if avg_vol is None or avg_vol < min_vol:
+    avg_vol_display = "N/A"
+else:
+    if avg_vol >= 1_000_000:
+        avg_vol_display = f"{avg_vol/1_000_000:.1f}M"
+    elif avg_vol >= 1_000:
+        avg_vol_display = f"{avg_vol/1_000:.0f}K"
     else:
-        if avg_vol >= 1_000_000:
-            avg_vol_display = f"{avg_vol/1_000_000:.1f}M"
-        elif avg_vol >= 1_000:
-            avg_vol_display = f"{avg_vol/1_000:.0f}K"
-        else:
-            avg_vol_display = str(int(avg_vol))
+        avg_vol_display = str(int(avg_vol))
 
-    if day_chg is None:
-        day_chg = candidate.get("tv_day_chg", 0.0)
+if day_chg is None:
+    day_chg = candidate.get("tv_day_chg", 0.0)
 
-    return {
-        "ticker":      ticker,
-        "price":       round(tv_close, 2),
-        "atr_mult":    round(atr_mult, 2),
-        "tv_atr_mult": round(candidate["tv_atr_mult"], 2),
-        "sma":         round(tv_sma50, 2),
-        "atr":         round(tv_atr, 2),
-        "atr_pct":     round(atr_pct * 100, 2),
-        "pct_sma":     round(pct_sma * 100, 1),
-        "day_chg":     day_chg,
-        "avg_vol":     avg_vol_display,
-        "is_etf":      candidate["is_etf"],
-        "exchange":    candidate["exchange"],
-        # Qullamaggie parabolic short signal fields
-        "consec_days": consec_days,
-        "gain_5d":     round(float(candidate.get("gain_5d") or 0), 1),
-        "gain_1m":     round(float(candidate.get("gain_1m") or 0), 1),
-        "rel_vol":     round(float(candidate.get("rel_vol") or 1.0), 2),
-        "tv_gap":      round(float(candidate.get("tv_gap")  or 0), 2),
-        "is_day1":     consec_days <= 1,   # Qullamaggie: never short day 1
-    }
+return {
+    "ticker":      ticker,
+    "price":       round(tv_close, 2),
+    "atr_mult":    round(atr_mult, 2),
+    "tv_atr_mult": round(candidate["tv_atr_mult"], 2),
+    "sma":         round(tv_sma50, 2),
+    "atr":         round(tv_atr, 2),
+    "atr_pct":     round(atr_pct * 100, 2),
+    "pct_sma":     round(pct_sma * 100, 1),
+    "day_chg":     day_chg,
+    "avg_vol":     avg_vol_display,
+    "is_etf":      candidate["is_etf"],
+    "exchange":    candidate["exchange"],
+    # Qullamaggie parabolic short signal fields
+    "consec_days": consec_days,
+    "gain_5d":     round(float(candidate.get("gain_5d") or 0), 1),
+    "gain_1m":     round(float(candidate.get("gain_1m") or 0), 1),
+    "rel_vol":     round(float(candidate.get("rel_vol") or 1.0), 2),
+    "tv_gap":      round(float(candidate.get("tv_gap")  or 0), 2),
+    "is_day1":     consec_days <= 1,   # Qullamaggie: never short day 1
+}
+```
+
 def run_two_phase_scan(min_price, min_atr_mult, sma_period, atr_period,
-                       asset_filter, exchange_filter, workers, min_vol,
-                       mcap_tiers, phase1_status_cb, phase2_progress_cb):
-    """
-    Full two-phase scan.
-    phase1_status_cb(msg, n_candidates) — called once after Phase 1 completes.
-    phase2_progress_cb(pct, done, total) — called after each Phase 2 ticker.
-    """
-    # ── Phase 1 ──────────────────────────────────────────────────────────────
-    prescreen_mult = min_atr_mult * 0.80   # 20% buffer for boundary cases
-    candidates, err = phase1_tradingview(
-        min_price, min_vol, prescreen_mult, asset_filter, exchange_filter, mcap_tiers
-    )
+asset_filter, exchange_filter, workers, min_vol,
+mcap_tiers, phase1_status_cb, phase2_progress_cb):
+“””
+Full two-phase scan.
+phase1_status_cb(msg, n_candidates) — called once after Phase 1 completes.
+phase2_progress_cb(pct, done, total) — called after each Phase 2 ticker.
+“””
+# ── Phase 1 ──────────────────────────────────────────────────────────────
+prescreen_mult = min_atr_mult * 0.80   # 20% buffer for boundary cases
+candidates, err = phase1_tradingview(
+min_price, min_vol, prescreen_mult, asset_filter, exchange_filter, mcap_tiers
+)
 
-    if err:
-        phase1_status_cb(f"Phase 1 warning: {err}", 0)
-        candidates = []
+```
+if err:
+    phase1_status_cb(f"Phase 1 warning: {err}", 0)
+    candidates = []
 
-    phase1_status_cb(None, len(candidates))
+phase1_status_cb(None, len(candidates))
 
-    if not candidates:
-        return []
+if not candidates:
+    return []
 
-    # ── Phase 2 ──────────────────────────────────────────────────────────────
-    total, done, results = len(candidates), 0, []
+# ── Phase 2 ──────────────────────────────────────────────────────────────
+total, done, results = len(candidates), 0, []
 
-    with ThreadPoolExecutor(max_workers=workers) as ex:
-        futs = {
-            ex.submit(phase2_confirm, c, sma_period, atr_period,
-                      min_price, min_vol, min_atr_mult): c
-            for c in candidates
-        }
-        for fut in as_completed(futs):
-            done += 1
-            phase2_progress_cb(done / total, done, total)
-            res = fut.result()
-            if res:
-                results.append(res)
+with ThreadPoolExecutor(max_workers=workers) as ex:
+    futs = {
+        ex.submit(phase2_confirm, c, sma_period, atr_period,
+                  min_price, min_vol, min_atr_mult): c
+        for c in candidates
+    }
+    for fut in as_completed(futs):
+        done += 1
+        phase2_progress_cb(done / total, done, total)
+        res = fut.result()
+        if res:
+            results.append(res)
 
-    return sorted(results, key=lambda x: x["atr_mult"], reverse=True)
-
+return sorted(results, key=lambda x: x["atr_mult"], reverse=True)
+```
 
 # ─────────────────────────────────────────────────────────────────────────────
-#  EPISODIC PIVOT SCANNER
+
+# EPISODIC PIVOT SCANNER
+
 # ─────────────────────────────────────────────────────────────────────────────
 
 def phase1_ep(min_gap_pct: float, min_vol: int, min_price: float,
-              asset_filter: str, exchange_filter: list,
-              mcap_tiers: list | None = None) -> tuple[list, str | None]:
-    """Phase 1 — TradingView EP scan: gap >= threshold, high rel vol, price > min."""
-    try:
-        from tradingview_screener import Query, Column
-    except ImportError:
-        return [], "tradingview-screener not installed"
+asset_filter: str, exchange_filter: list,
+mcap_tiers: list | None = None) -> tuple[list, str | None]:
+“”“Phase 1 — TradingView EP scan: gap >= threshold, high rel vol, price > min.”””
+try:
+from tradingview_screener import Query, Column
+except ImportError:
+return [], “tradingview-screener not installed”
 
-    tv_exchanges = list({TV_EXCHANGE_MAP[e] for e in exchange_filter
-                         if e in TV_EXCHANGE_MAP and TV_EXCHANGE_MAP[e]})
-    try:
-        q = (
-            Query()
-            .set_markets("america")
-            .select("name", "close", "gap", "relative_volume_10d_calc",
-                    "volume", "change", "Perf.3M", "Perf.6M", "type", "exchange",
-                    "market_cap_basic", "SMA50", "ATR")
-            .where(
-                Column("close") > min_price,
-                Column("volume") > min_vol,
-                Column("gap") >= min_gap_pct,
-                Column("relative_volume_10d_calc") >= 2.0,
-            )
-            .order_by("relative_volume_10d_calc", ascending=False)
-            .limit(500)
+```
+tv_exchanges = list({TV_EXCHANGE_MAP[e] for e in exchange_filter
+                     if e in TV_EXCHANGE_MAP and TV_EXCHANGE_MAP[e]})
+try:
+    q = (
+        Query()
+        .set_markets("america")
+        .select("name", "close", "gap", "relative_volume_10d_calc",
+                "volume", "change", "Perf.3M", "Perf.6M", "type", "exchange",
+                "market_cap_basic", "SMA50", "ATR")
+        .where(
+            Column("close") > min_price,
+            Column("volume") > min_vol,
+            Column("gap") >= min_gap_pct,
+            Column("relative_volume_10d_calc") >= 2.0,
         )
-        if asset_filter == "ETFs Only":
-            q = q.where(Column("type").isin(["fund", "etf"]))
-        elif asset_filter == "Stocks Only":
-            q = q.where(Column("type") == "stock")
-        if tv_exchanges:
-            q = q.where(Column("exchange").isin(tv_exchanges))
-        if mcap_tiers and "All" not in mcap_tiers:
-            cap_conditions = []
-            for tier in mcap_tiers:
-                lo, hi = MCAP_TIERS.get(tier, (0, None))
-                if lo and hi:
-                    cap_conditions.append((Column("market_cap_basic") >= lo) & (Column("market_cap_basic") < hi))
-                elif lo:
-                    cap_conditions.append(Column("market_cap_basic") >= lo)
-                elif hi:
-                    cap_conditions.append(Column("market_cap_basic") < hi)
-            if cap_conditions:
-                combined = cap_conditions[0]
-                for c in cap_conditions[1:]: combined = combined | c
-                q = q.where(combined)
-
-        _, df = q.get_scanner_data()
-    except Exception as e:
-        return [], f"TradingView API error: {e}"
-
-    if df is None or df.empty:
-        return [], None
-
-    for col in ["gap", "relative_volume_10d_calc", "change", "Perf.3M", "Perf.6M", "SMA50", "ATR"]:
-        if col not in df.columns: df[col] = 0.0
-    df = df.fillna(0.0)
-    df["is_etf"] = df["type"].isin(["fund", "etf", "dr"])
-
-    return (
-        df[["name", "close", "gap", "relative_volume_10d_calc", "change",
-            "Perf.3M", "Perf.6M", "exchange", "is_etf", "SMA50", "ATR"]]
-        .rename(columns={"name": "ticker", "close": "tv_close",
-                         "relative_volume_10d_calc": "rel_vol",
-                         "change": "day_chg", "Perf.3M": "gain_3m",
-                         "Perf.6M": "gain_6m", "SMA50": "tv_sma50", "ATR": "tv_atr"})
-        .to_dict("records"),
-        None,
+        .order_by("relative_volume_10d_calc", ascending=False)
+        .limit(500)
     )
+    if asset_filter == "ETFs Only":
+        q = q.where(Column("type").isin(["fund", "etf"]))
+    elif asset_filter == "Stocks Only":
+        q = q.where(Column("type") == "stock")
+    if tv_exchanges:
+        q = q.where(Column("exchange").isin(tv_exchanges))
+    if mcap_tiers and "All" not in mcap_tiers:
+        cap_conditions = []
+        for tier in mcap_tiers:
+            lo, hi = MCAP_TIERS.get(tier, (0, None))
+            if lo and hi:
+                cap_conditions.append((Column("market_cap_basic") >= lo) & (Column("market_cap_basic") < hi))
+            elif lo:
+                cap_conditions.append(Column("market_cap_basic") >= lo)
+            elif hi:
+                cap_conditions.append(Column("market_cap_basic") < hi)
+        if cap_conditions:
+            combined = cap_conditions[0]
+            for c in cap_conditions[1:]: combined = combined | c
+            q = q.where(combined)
 
+    _, df = q.get_scanner_data()
+except Exception as e:
+    return [], f"TradingView API error: {e}"
+
+if df is None or df.empty:
+    return [], None
+
+for col in ["gap", "relative_volume_10d_calc", "change", "Perf.3M", "Perf.6M", "SMA50", "ATR"]:
+    if col not in df.columns: df[col] = 0.0
+df = df.fillna(0.0)
+df["is_etf"] = df["type"].isin(["fund", "etf", "dr"])
+
+return (
+    df[["name", "close", "gap", "relative_volume_10d_calc", "change",
+        "Perf.3M", "Perf.6M", "exchange", "is_etf", "SMA50", "ATR"]]
+    .rename(columns={"name": "ticker", "close": "tv_close",
+                     "relative_volume_10d_calc": "rel_vol",
+                     "change": "day_chg", "Perf.3M": "gain_3m",
+                     "Perf.6M": "gain_6m", "SMA50": "tv_sma50", "ATR": "tv_atr"})
+    .to_dict("records"),
+    None,
+)
+```
 
 def phase2_ep_confirm(candidate: dict, min_vol: int) -> dict | None:
-    """Phase 2 EP — enrich with yfinance: avg vol, streak, prior consolidation check."""
-    ticker   = candidate["ticker"]
-    tv_close = float(candidate.get("tv_close") or 0)
-    gap_pct  = float(candidate.get("gap") or 0)
-    rel_vol  = float(candidate.get("rel_vol") or 0)
+“”“Phase 2 EP — enrich with yfinance: avg vol, streak, prior consolidation check.”””
+ticker   = candidate[“ticker”]
+tv_close = float(candidate.get(“tv_close”) or 0)
+gap_pct  = float(candidate.get(“gap”) or 0)
+rel_vol  = float(candidate.get(“rel_vol”) or 0)
 
-    if tv_close <= 0:
-        return None
+```
+if tv_close <= 0:
+    return None
 
-    # Was stock in consolidation before the EP? (low 3M gain before today = good EP)
-    gain_3m = float(candidate.get("gain_3m") or 0)
+# Was stock in consolidation before the EP? (low 3M gain before today = good EP)
+gain_3m = float(candidate.get("gain_3m") or 0)
 
-    avg_vol  = None
-    consec   = 0
-    day_chg  = float(candidate.get("day_chg") or 0)
+avg_vol  = None
+consec   = 0
+day_chg  = float(candidate.get("day_chg") or 0)
 
-    try:
-        df = yf.download(ticker, period="3mo", interval="1d",
-                         progress=False, auto_adjust=False)
-        if not df.empty:
-            if isinstance(df.columns, pd.MultiIndex):
-                df.columns = df.columns.get_level_values(0)
-            close_col = "Close" if "Close" in df.columns else "Adj Close"
-            if close_col in df.columns and "Volume" in df.columns:
-                closes  = df[close_col].squeeze().dropna()
-                volumes = df["Volume"].squeeze()
-                if len(volumes) >= 5:
-                    avg_vol = float(volumes.tail(20).mean())
-                if len(closes) >= 2:
-                    for i in range(len(closes) - 1, 0, -1):
-                        if float(closes.iloc[i]) > float(closes.iloc[i - 1]):
-                            consec += 1
-                        else:
-                            break
-    except Exception:
-        pass
+try:
+    df = yf.download(ticker, period="3mo", interval="1d",
+                     progress=False, auto_adjust=False)
+    if not df.empty:
+        if isinstance(df.columns, pd.MultiIndex):
+            df.columns = df.columns.get_level_values(0)
+        close_col = "Close" if "Close" in df.columns else "Adj Close"
+        if close_col in df.columns and "Volume" in df.columns:
+            closes  = df[close_col].squeeze().dropna()
+            volumes = df["Volume"].squeeze()
+            if len(volumes) >= 5:
+                avg_vol = float(volumes.tail(20).mean())
+            if len(closes) >= 2:
+                for i in range(len(closes) - 1, 0, -1):
+                    if float(closes.iloc[i]) > float(closes.iloc[i - 1]):
+                        consec += 1
+                    else:
+                        break
+except Exception:
+    pass
 
-    if avg_vol is not None and avg_vol >= 1_000_000:
-        avg_vol_disp = f"{avg_vol/1_000_000:.1f}M"
-    elif avg_vol is not None and avg_vol >= 1_000:
-        avg_vol_disp = f"{avg_vol/1_000:.0f}K"
-    else:
-        avg_vol_disp = "N/A"
+if avg_vol is not None and avg_vol >= 1_000_000:
+    avg_vol_disp = f"{avg_vol/1_000_000:.1f}M"
+elif avg_vol is not None and avg_vol >= 1_000:
+    avg_vol_disp = f"{avg_vol/1_000:.0f}K"
+else:
+    avg_vol_disp = "N/A"
 
-    # Quality score: higher gap + higher rel_vol + low prior gain (neglected stock) = better EP
-    neglect_bonus = 1.0 if gain_3m < 20 else 0.0  # stock was sideways → true EP
-    ep_score = round(gap_pct * 0.5 + rel_vol * 2 + neglect_bonus * 10, 1)
+# Quality score: higher gap + higher rel_vol + low prior gain (neglected stock) = better EP
+neglect_bonus = 1.0 if gain_3m < 20 else 0.0  # stock was sideways → true EP
+ep_score = round(gap_pct * 0.5 + rel_vol * 2 + neglect_bonus * 10, 1)
 
-    return {
-        "ticker":     ticker,
-        "price":      round(tv_close, 2),
-        "gap_pct":    round(gap_pct, 1),
-        "rel_vol":    round(rel_vol, 2),
-        "day_chg":    round(float(day_chg), 2),
-        "gain_3m":    round(gain_3m, 1),
-        "gain_6m":    round(float(candidate.get("gain_6m") or 0), 1),
-        "avg_vol":    avg_vol_disp,
-        "consec_days": consec,
-        "is_day1":    consec <= 1,
-        "ep_score":   ep_score,
-        "neglected":  gain_3m < 20,   # True = stock was basing → ideal EP
-        "is_etf":     candidate["is_etf"],
-        "exchange":   candidate["exchange"],
-    }
-
+return {
+    "ticker":     ticker,
+    "price":      round(tv_close, 2),
+    "gap_pct":    round(gap_pct, 1),
+    "rel_vol":    round(rel_vol, 2),
+    "day_chg":    round(float(day_chg), 2),
+    "gain_3m":    round(gain_3m, 1),
+    "gain_6m":    round(float(candidate.get("gain_6m") or 0), 1),
+    "avg_vol":    avg_vol_disp,
+    "consec_days": consec,
+    "is_day1":    consec <= 1,
+    "ep_score":   ep_score,
+    "neglected":  gain_3m < 20,   # True = stock was basing → ideal EP
+    "is_etf":     candidate["is_etf"],
+    "exchange":   candidate["exchange"],
+}
+```
 
 def run_ep_scan(min_gap_pct, min_price, asset_filter, exchange_filter,
-                min_vol, mcap_tiers, workers, p1_cb, p2_cb):
-    candidates, err = phase1_ep(min_gap_pct, min_vol, min_price,
-                                 asset_filter, exchange_filter, mcap_tiers)
-    if err:
-        p1_cb(f"Phase 1 warning: {err}", 0)
-        candidates = []
-    p1_cb(None, len(candidates))
-    if not candidates:
-        return []
+min_vol, mcap_tiers, workers, p1_cb, p2_cb):
+candidates, err = phase1_ep(min_gap_pct, min_vol, min_price,
+asset_filter, exchange_filter, mcap_tiers)
+if err:
+p1_cb(f”Phase 1 warning: {err}”, 0)
+candidates = []
+p1_cb(None, len(candidates))
+if not candidates:
+return []
 
-    total, done, results = len(candidates), 0, []
-    with ThreadPoolExecutor(max_workers=workers) as ex:
-        futs = {ex.submit(phase2_ep_confirm, c, min_vol): c for c in candidates}
-        for fut in as_completed(futs):
-            done += 1
-            p2_cb(done / total, done, total)
-            res = fut.result()
-            if res:
-                results.append(res)
-    return sorted(results, key=lambda x: x["ep_score"], reverse=True)
-
+```
+total, done, results = len(candidates), 0, []
+with ThreadPoolExecutor(max_workers=workers) as ex:
+    futs = {ex.submit(phase2_ep_confirm, c, min_vol): c for c in candidates}
+    for fut in as_completed(futs):
+        done += 1
+        p2_cb(done / total, done, total)
+        res = fut.result()
+        if res:
+            results.append(res)
+return sorted(results, key=lambda x: x["ep_score"], reverse=True)
+```
 
 # ─────────────────────────────────────────────────────────────────────────────
-#  MOMENTUM BREAKOUT SCANNER
+
+# MOMENTUM BREAKOUT SCANNER
+
 # ─────────────────────────────────────────────────────────────────────────────
 
 def phase1_breakout(min_perf_1m: float, min_vol: int, min_price: float,
-                    asset_filter: str, exchange_filter: list,
-                    mcap_tiers: list | None = None) -> tuple[list, str | None]:
-    """Phase 1 — TradingView breakout scan: strong 1-3M gainers near MAs."""
-    try:
-        from tradingview_screener import Query, Column
-    except ImportError:
-        return [], "tradingview-screener not installed"
+asset_filter: str, exchange_filter: list,
+mcap_tiers: list | None = None) -> tuple[list, str | None]:
+“”“Phase 1 — TradingView breakout scan: strong 1-3M gainers near MAs.”””
+try:
+from tradingview_screener import Query, Column
+except ImportError:
+return [], “tradingview-screener not installed”
 
-    tv_exchanges = list({TV_EXCHANGE_MAP[e] for e in exchange_filter
-                         if e in TV_EXCHANGE_MAP and TV_EXCHANGE_MAP[e]})
-    try:
-        q = (
-            Query()
-            .set_markets("america")
-            .select("name", "close", "SMA10", "SMA20", "SMA50", "ATR",
-                    "volume", "relative_volume_10d_calc", "change",
-                    "Perf.1M", "Perf.3M", "Perf.6M", "type", "exchange",
-                    "market_cap_basic")
-            .where(
-                Column("close") > min_price,
-                Column("volume") > min_vol,
-                Column("Perf.1M") >= min_perf_1m,
-                Column("close") > Column("SMA50"),      # above long-term MA
-                Column("relative_volume_10d_calc") < 1.5,  # volume drying up = consolidation
-            )
-            .order_by("Perf.3M", ascending=False)
-            .limit(500)
+```
+tv_exchanges = list({TV_EXCHANGE_MAP[e] for e in exchange_filter
+                     if e in TV_EXCHANGE_MAP and TV_EXCHANGE_MAP[e]})
+try:
+    q = (
+        Query()
+        .set_markets("america")
+        .select("name", "close", "SMA10", "SMA20", "SMA50", "ATR",
+                "volume", "relative_volume_10d_calc", "change",
+                "Perf.1M", "Perf.3M", "Perf.6M", "type", "exchange",
+                "market_cap_basic")
+        .where(
+            Column("close") > min_price,
+            Column("volume") > min_vol,
+            Column("Perf.1M") >= min_perf_1m,
+            Column("close") > Column("SMA50"),      # above long-term MA
+            Column("relative_volume_10d_calc") < 1.5,  # volume drying up = consolidation
         )
-        if asset_filter == "ETFs Only":
-            q = q.where(Column("type").isin(["fund", "etf"]))
-        elif asset_filter == "Stocks Only":
-            q = q.where(Column("type") == "stock")
-        if tv_exchanges:
-            q = q.where(Column("exchange").isin(tv_exchanges))
-        if mcap_tiers and "All" not in mcap_tiers:
-            cap_conditions = []
-            for tier in mcap_tiers:
-                lo, hi = MCAP_TIERS.get(tier, (0, None))
-                if lo and hi:
-                    cap_conditions.append((Column("market_cap_basic") >= lo) & (Column("market_cap_basic") < hi))
-                elif lo:
-                    cap_conditions.append(Column("market_cap_basic") >= lo)
-                elif hi:
-                    cap_conditions.append(Column("market_cap_basic") < hi)
-            if cap_conditions:
-                combined = cap_conditions[0]
-                for c in cap_conditions[1:]: combined = combined | c
-                q = q.where(combined)
-
-        _, df = q.get_scanner_data()
-    except Exception as e:
-        return [], f"TradingView API error: {e}"
-
-    if df is None or df.empty:
-        return [], None
-
-    for col in ["SMA10", "SMA20", "SMA50", "ATR", "relative_volume_10d_calc",
-                "change", "Perf.1M", "Perf.3M", "Perf.6M"]:
-        if col not in df.columns: df[col] = 0.0
-    df = df.fillna(0.0)
-    df["is_etf"] = df["type"].isin(["fund", "etf", "dr"])
-
-    return (
-        df[["name", "close", "SMA10", "SMA20", "SMA50", "ATR",
-            "relative_volume_10d_calc", "change",
-            "Perf.1M", "Perf.3M", "Perf.6M", "exchange", "is_etf"]]
-        .rename(columns={"name": "ticker", "close": "tv_close",
-                         "relative_volume_10d_calc": "rel_vol",
-                         "change": "day_chg",
-                         "Perf.1M": "gain_1m", "Perf.3M": "gain_3m", "Perf.6M": "gain_6m"})
-        .to_dict("records"),
-        None,
+        .order_by("Perf.3M", ascending=False)
+        .limit(500)
     )
+    if asset_filter == "ETFs Only":
+        q = q.where(Column("type").isin(["fund", "etf"]))
+    elif asset_filter == "Stocks Only":
+        q = q.where(Column("type") == "stock")
+    if tv_exchanges:
+        q = q.where(Column("exchange").isin(tv_exchanges))
+    if mcap_tiers and "All" not in mcap_tiers:
+        cap_conditions = []
+        for tier in mcap_tiers:
+            lo, hi = MCAP_TIERS.get(tier, (0, None))
+            if lo and hi:
+                cap_conditions.append((Column("market_cap_basic") >= lo) & (Column("market_cap_basic") < hi))
+            elif lo:
+                cap_conditions.append(Column("market_cap_basic") >= lo)
+            elif hi:
+                cap_conditions.append(Column("market_cap_basic") < hi)
+        if cap_conditions:
+            combined = cap_conditions[0]
+            for c in cap_conditions[1:]: combined = combined | c
+            q = q.where(combined)
 
+    _, df = q.get_scanner_data()
+except Exception as e:
+    return [], f"TradingView API error: {e}"
+
+if df is None or df.empty:
+    return [], None
+
+for col in ["SMA10", "SMA20", "SMA50", "ATR", "relative_volume_10d_calc",
+            "change", "Perf.1M", "Perf.3M", "Perf.6M"]:
+    if col not in df.columns: df[col] = 0.0
+df = df.fillna(0.0)
+df["is_etf"] = df["type"].isin(["fund", "etf", "dr"])
+
+return (
+    df[["name", "close", "SMA10", "SMA20", "SMA50", "ATR",
+        "relative_volume_10d_calc", "change",
+        "Perf.1M", "Perf.3M", "Perf.6M", "exchange", "is_etf"]]
+    .rename(columns={"name": "ticker", "close": "tv_close",
+                     "relative_volume_10d_calc": "rel_vol",
+                     "change": "day_chg",
+                     "Perf.1M": "gain_1m", "Perf.3M": "gain_3m", "Perf.6M": "gain_6m"})
+    .to_dict("records"),
+    None,
+)
+```
 
 def phase2_breakout_confirm(candidate: dict, min_vol: int) -> dict | None:
-    """Phase 2 Breakout — check consolidation tightness, proximity to MAs."""
-    ticker   = candidate["ticker"]
-    tv_close = float(candidate.get("tv_close") or 0)
-    sma10    = float(candidate.get("SMA10") or 0)
-    sma20    = float(candidate.get("SMA20") or 0)
-    sma50    = float(candidate.get("SMA50") or 0)
-    tv_atr   = float(candidate.get("ATR")   or 0)
+“”“Phase 2 Breakout — check consolidation tightness, proximity to MAs.”””
+ticker   = candidate[“ticker”]
+tv_close = float(candidate.get(“tv_close”) or 0)
+sma10    = float(candidate.get(“SMA10”) or 0)
+sma20    = float(candidate.get(“SMA20”) or 0)
+sma50    = float(candidate.get(“SMA50”) or 0)
+tv_atr   = float(candidate.get(“ATR”)   or 0)
 
-    if tv_close <= 0:
-        return None
+```
+if tv_close <= 0:
+    return None
 
-    # Distance from key MAs
-    dist_10 = round((tv_close - sma10) / sma10 * 100, 1) if sma10 > 0 else None
-    dist_20 = round((tv_close - sma20) / sma20 * 100, 1) if sma20 > 0 else None
-    dist_50 = round((tv_close - sma50) / sma50 * 100, 1) if sma50 > 0 else None
+# Distance from key MAs
+dist_10 = round((tv_close - sma10) / sma10 * 100, 1) if sma10 > 0 else None
+dist_20 = round((tv_close - sma20) / sma20 * 100, 1) if sma20 > 0 else None
+dist_50 = round((tv_close - sma50) / sma50 * 100, 1) if sma50 > 0 else None
 
-    # Proximity score: closer to 10/20 MA = better consolidation near MA
-    ma_prox = min(abs(dist_10 or 99), abs(dist_20 or 99))
+# Proximity score: closer to 10/20 MA = better consolidation near MA
+ma_prox = min(abs(dist_10 or 99), abs(dist_20 or 99))
 
-    avg_vol  = None
-    range_tightness = None
-    consec   = 0
-    day_chg  = float(candidate.get("day_chg") or 0)
+avg_vol  = None
+range_tightness = None
+consec   = 0
+day_chg  = float(candidate.get("day_chg") or 0)
 
-    try:
-        df = yf.download(ticker, period="3mo", interval="1d",
-                         progress=False, auto_adjust=False)
-        if not df.empty:
-            if isinstance(df.columns, pd.MultiIndex):
-                df.columns = df.columns.get_level_values(0)
-            close_col = "Close" if "Close" in df.columns else "Adj Close"
-            high_col  = "High"
-            low_col   = "Low"
-            if all(c in df.columns for c in [close_col, high_col, low_col, "Volume"]):
-                closes  = df[close_col].squeeze().dropna()
-                highs   = df[high_col].squeeze()
-                lows    = df[low_col].squeeze()
-                volumes = df["Volume"].squeeze()
-                if len(volumes) >= 5:
-                    avg_vol = float(volumes.tail(20).mean())
-                # Range tightness: avg (H-L)/close over last 10 days — lower = tighter base
-                if len(closes) >= 10:
-                    recent_range = ((highs.tail(10) - lows.tail(10)) / closes.tail(10)).mean()
-                    range_tightness = round(float(recent_range) * 100, 1)
-                if len(closes) >= 2:
-                    for i in range(len(closes) - 1, 0, -1):
-                        if float(closes.iloc[i]) > float(closes.iloc[i - 1]):
-                            consec += 1
-                        else:
-                            break
-    except Exception:
-        pass
+try:
+    df = yf.download(ticker, period="3mo", interval="1d",
+                     progress=False, auto_adjust=False)
+    if not df.empty:
+        if isinstance(df.columns, pd.MultiIndex):
+            df.columns = df.columns.get_level_values(0)
+        close_col = "Close" if "Close" in df.columns else "Adj Close"
+        high_col  = "High"
+        low_col   = "Low"
+        if all(c in df.columns for c in [close_col, high_col, low_col, "Volume"]):
+            closes  = df[close_col].squeeze().dropna()
+            highs   = df[high_col].squeeze()
+            lows    = df[low_col].squeeze()
+            volumes = df["Volume"].squeeze()
+            if len(volumes) >= 5:
+                avg_vol = float(volumes.tail(20).mean())
+            # Range tightness: avg (H-L)/close over last 10 days — lower = tighter base
+            if len(closes) >= 10:
+                recent_range = ((highs.tail(10) - lows.tail(10)) / closes.tail(10)).mean()
+                range_tightness = round(float(recent_range) * 100, 1)
+            if len(closes) >= 2:
+                for i in range(len(closes) - 1, 0, -1):
+                    if float(closes.iloc[i]) > float(closes.iloc[i - 1]):
+                        consec += 1
+                    else:
+                        break
+except Exception:
+    pass
 
-    if avg_vol is not None and avg_vol >= 1_000_000:
-        avg_vol_disp = f"{avg_vol/1_000_000:.1f}M"
-    elif avg_vol is not None and avg_vol >= 1_000:
-        avg_vol_disp = f"{avg_vol/1_000:.0f}K"
-    else:
-        avg_vol_disp = "N/A"
+if avg_vol is not None and avg_vol >= 1_000_000:
+    avg_vol_disp = f"{avg_vol/1_000_000:.1f}M"
+elif avg_vol is not None and avg_vol >= 1_000:
+    avg_vol_disp = f"{avg_vol/1_000:.0f}K"
+else:
+    avg_vol_disp = "N/A"
 
-    # Setup quality: tight range + near MA + strong prior move = higher score
-    tightness_score = max(0, 10 - (range_tightness or 10))
-    proximity_score = max(0, 10 - ma_prox)
-    momentum_score  = min(float(candidate.get("gain_3m") or 0) / 10, 10)
-    setup_score     = round(tightness_score * 0.4 + proximity_score * 0.4 + momentum_score * 0.2, 1)
+# Setup quality: tight range + near MA + strong prior move = higher score
+tightness_score = max(0, 10 - (range_tightness or 10))
+proximity_score = max(0, 10 - ma_prox)
+momentum_score  = min(float(candidate.get("gain_3m") or 0) / 10, 10)
+setup_score     = round(tightness_score * 0.4 + proximity_score * 0.4 + momentum_score * 0.2, 1)
 
-    return {
-        "ticker":           ticker,
-        "price":            round(tv_close, 2),
-        "day_chg":          round(day_chg, 2),
-        "gain_1m":          round(float(candidate.get("gain_1m") or 0), 1),
-        "gain_3m":          round(float(candidate.get("gain_3m") or 0), 1),
-        "gain_6m":          round(float(candidate.get("gain_6m") or 0), 1),
-        "sma10":            round(sma10, 2),
-        "sma20":            round(sma20, 2),
-        "sma50":            round(sma50, 2),
-        "dist_10":          dist_10,
-        "dist_20":          dist_20,
-        "dist_50":          dist_50,
-        "ma_proximity":     round(ma_prox, 1),
-        "range_tightness":  range_tightness,
-        "rel_vol":          round(float(candidate.get("rel_vol") or 0), 2),
-        "avg_vol":          avg_vol_disp,
-        "consec_days":      consec,
-        "setup_score":      setup_score,
-        "is_etf":           candidate["is_etf"],
-        "exchange":         candidate["exchange"],
-    }
-
+return {
+    "ticker":           ticker,
+    "price":            round(tv_close, 2),
+    "day_chg":          round(day_chg, 2),
+    "gain_1m":          round(float(candidate.get("gain_1m") or 0), 1),
+    "gain_3m":          round(float(candidate.get("gain_3m") or 0), 1),
+    "gain_6m":          round(float(candidate.get("gain_6m") or 0), 1),
+    "sma10":            round(sma10, 2),
+    "sma20":            round(sma20, 2),
+    "sma50":            round(sma50, 2),
+    "dist_10":          dist_10,
+    "dist_20":          dist_20,
+    "dist_50":          dist_50,
+    "ma_proximity":     round(ma_prox, 1),
+    "range_tightness":  range_tightness,
+    "rel_vol":          round(float(candidate.get("rel_vol") or 0), 2),
+    "avg_vol":          avg_vol_disp,
+    "consec_days":      consec,
+    "setup_score":      setup_score,
+    "is_etf":           candidate["is_etf"],
+    "exchange":         candidate["exchange"],
+}
+```
 
 def run_breakout_scan(min_perf_1m, min_price, asset_filter, exchange_filter,
-                      min_vol, mcap_tiers, workers, p1_cb, p2_cb):
-    candidates, err = phase1_breakout(min_perf_1m, min_vol, min_price,
-                                       asset_filter, exchange_filter, mcap_tiers)
-    if err:
-        p1_cb(f"Phase 1 warning: {err}", 0)
-        candidates = []
-    p1_cb(None, len(candidates))
-    if not candidates:
-        return []
+min_vol, mcap_tiers, workers, p1_cb, p2_cb):
+candidates, err = phase1_breakout(min_perf_1m, min_vol, min_price,
+asset_filter, exchange_filter, mcap_tiers)
+if err:
+p1_cb(f”Phase 1 warning: {err}”, 0)
+candidates = []
+p1_cb(None, len(candidates))
+if not candidates:
+return []
 
-    total, done, results = len(candidates), 0, []
-    with ThreadPoolExecutor(max_workers=workers) as ex:
-        futs = {ex.submit(phase2_breakout_confirm, c, min_vol): c for c in candidates}
-        for fut in as_completed(futs):
-            done += 1
-            p2_cb(done / total, done, total)
-            res = fut.result()
-            if res:
-                results.append(res)
-    return sorted(results, key=lambda x: x["setup_score"], reverse=True)
-
+```
+total, done, results = len(candidates), 0, []
+with ThreadPoolExecutor(max_workers=workers) as ex:
+    futs = {ex.submit(phase2_breakout_confirm, c, min_vol): c for c in candidates}
+    for fut in as_completed(futs):
+        done += 1
+        p2_cb(done / total, done, total)
+        res = fut.result()
+        if res:
+            results.append(res)
+return sorted(results, key=lambda x: x["setup_score"], reverse=True)
+```
 
 # ─────────────────────────────────────────────────────────────────────────────
-#  PARABOLIC LONG SCANNER
-#  Inverse of Parabolic Short: stocks down 40%+ in ≤10 days, vol spiking,
-#  first green day = bounce entry on ORH. Targets 50-100% bounce.
+
+# PARABOLIC LONG SCANNER
+
+# Inverse of Parabolic Short: stocks down 40%+ in ≤10 days, vol spiking,
+
+# first green day = bounce entry on ORH. Targets 50-100% bounce.
+
 # ─────────────────────────────────────────────────────────────────────────────
 
 def phase1_parabolic_long(min_drop_5d: float, min_vol: int, min_price: float,
-                          asset_filter: str, exchange_filter: list,
-                          mcap_tiers: list | None = None) -> tuple[list, str | None]:
-    """Phase 1 — TV scan: stocks down sharply in 5 days, high rel vol today."""
-    try:
-        from tradingview_screener import Query, Column
-    except ImportError:
-        return [], "tradingview-screener not installed"
+asset_filter: str, exchange_filter: list,
+mcap_tiers: list | None = None) -> tuple[list, str | None]:
+“”“Phase 1 — TV scan: stocks down sharply in 5 days, high rel vol today.”””
+try:
+from tradingview_screener import Query, Column
+except ImportError:
+return [], “tradingview-screener not installed”
 
-    tv_exchanges = list({TV_EXCHANGE_MAP[e] for e in exchange_filter
-                         if e in TV_EXCHANGE_MAP and TV_EXCHANGE_MAP[e]})
-    try:
-        q = (
-            Query()
-            .set_markets("america")
-            .select("name", "close", "change", "Perf.5D", "Perf.1M",
-                    "relative_volume_10d_calc", "volume", "SMA10", "SMA20",
-                    "ATR", "gap", "type", "exchange", "market_cap_basic")
-            .where(
-                Column("close") > min_price,
-                Column("volume") > min_vol,
-                Column("Perf.5D") <= -min_drop_5d,       # down hard in 5 days
-                Column("relative_volume_10d_calc") >= 1.5, # vol spiking = real panic
-                Column("change") >= 0,                    # today is green (first bounce)
-            )
-            .order_by("Perf.5D", ascending=True)           # worst drops first
-            .limit(300)
+```
+tv_exchanges = list({TV_EXCHANGE_MAP[e] for e in exchange_filter
+                     if e in TV_EXCHANGE_MAP and TV_EXCHANGE_MAP[e]})
+try:
+    q = (
+        Query()
+        .set_markets("america")
+        .select("name", "close", "change", "Perf.5D", "Perf.1M",
+                "relative_volume_10d_calc", "volume", "SMA10", "SMA20",
+                "ATR", "gap", "type", "exchange", "market_cap_basic")
+        .where(
+            Column("close") > min_price,
+            Column("volume") > min_vol,
+            Column("Perf.5D") <= -min_drop_5d,       # down hard in 5 days
+            Column("relative_volume_10d_calc") >= 1.5, # vol spiking = real panic
+            Column("change") >= 0,                    # today is green (first bounce)
         )
-        if asset_filter == "ETFs Only":
-            q = q.where(Column("type").isin(["fund", "etf"]))
-        elif asset_filter == "Stocks Only":
-            q = q.where(Column("type") == "stock")
-        if tv_exchanges:
-            q = q.where(Column("exchange").isin(tv_exchanges))
-        if mcap_tiers and "All" not in mcap_tiers:
-            cap_conditions = []
-            for tier in mcap_tiers:
-                lo, hi = MCAP_TIERS.get(tier, (0, None))
-                if lo and hi:
-                    cap_conditions.append((Column("market_cap_basic") >= lo) & (Column("market_cap_basic") < hi))
-                elif lo:
-                    cap_conditions.append(Column("market_cap_basic") >= lo)
-                elif hi:
-                    cap_conditions.append(Column("market_cap_basic") < hi)
-            if cap_conditions:
-                combined = cap_conditions[0]
-                for c in cap_conditions[1:]: combined = combined | c
-                q = q.where(combined)
-
-        _, df = q.get_scanner_data()
-    except Exception as e:
-        return [], f"TradingView API error: {e}"
-
-    if df is None or df.empty:
-        return [], None
-
-    for col in ["change", "Perf.5D", "Perf.1M", "relative_volume_10d_calc",
-                "SMA10", "SMA20", "ATR", "gap"]:
-        if col not in df.columns: df[col] = 0.0
-    df = df.fillna(0.0)
-    df["is_etf"] = df["type"].isin(["fund", "etf", "dr"])
-
-    return (
-        df[["name", "close", "change", "Perf.5D", "Perf.1M",
-            "relative_volume_10d_calc", "SMA10", "SMA20", "ATR",
-            "gap", "exchange", "is_etf"]]
-        .rename(columns={"name": "ticker", "close": "tv_close",
-                         "change": "day_chg", "Perf.5D": "drop_5d",
-                         "Perf.1M": "drop_1m",
-                         "relative_volume_10d_calc": "rel_vol"})
-        .to_dict("records"),
-        None,
+        .order_by("Perf.5D", ascending=True)           # worst drops first
+        .limit(300)
     )
+    if asset_filter == "ETFs Only":
+        q = q.where(Column("type").isin(["fund", "etf"]))
+    elif asset_filter == "Stocks Only":
+        q = q.where(Column("type") == "stock")
+    if tv_exchanges:
+        q = q.where(Column("exchange").isin(tv_exchanges))
+    if mcap_tiers and "All" not in mcap_tiers:
+        cap_conditions = []
+        for tier in mcap_tiers:
+            lo, hi = MCAP_TIERS.get(tier, (0, None))
+            if lo and hi:
+                cap_conditions.append((Column("market_cap_basic") >= lo) & (Column("market_cap_basic") < hi))
+            elif lo:
+                cap_conditions.append(Column("market_cap_basic") >= lo)
+            elif hi:
+                cap_conditions.append(Column("market_cap_basic") < hi)
+        if cap_conditions:
+            combined = cap_conditions[0]
+            for c in cap_conditions[1:]: combined = combined | c
+            q = q.where(combined)
 
+    _, df = q.get_scanner_data()
+except Exception as e:
+    return [], f"TradingView API error: {e}"
+
+if df is None or df.empty:
+    return [], None
+
+for col in ["change", "Perf.5D", "Perf.1M", "relative_volume_10d_calc",
+            "SMA10", "SMA20", "ATR", "gap"]:
+    if col not in df.columns: df[col] = 0.0
+df = df.fillna(0.0)
+df["is_etf"] = df["type"].isin(["fund", "etf", "dr"])
+
+return (
+    df[["name", "close", "change", "Perf.5D", "Perf.1M",
+        "relative_volume_10d_calc", "SMA10", "SMA20", "ATR",
+        "gap", "exchange", "is_etf"]]
+    .rename(columns={"name": "ticker", "close": "tv_close",
+                     "change": "day_chg", "Perf.5D": "drop_5d",
+                     "Perf.1M": "drop_1m",
+                     "relative_volume_10d_calc": "rel_vol"})
+    .to_dict("records"),
+    None,
+)
+```
 
 def phase2_pl_confirm(candidate: dict, min_vol: int) -> dict | None:
-    """Phase 2 Parabolic Long — measure collapse speed, prior trend, bounce quality."""
-    ticker   = candidate["ticker"]
-    tv_close = float(candidate.get("tv_close") or 0)
-    drop_5d  = float(candidate.get("drop_5d") or 0)
-    rel_vol  = float(candidate.get("rel_vol") or 0)
-    day_chg  = float(candidate.get("day_chg") or 0)
-    sma10    = float(candidate.get("SMA10") or 0)
-    sma20    = float(candidate.get("SMA20") or 0)
-    atr      = float(candidate.get("ATR") or 0)
+“”“Phase 2 Parabolic Long — measure collapse speed, prior trend, bounce quality.”””
+ticker   = candidate[“ticker”]
+tv_close = float(candidate.get(“tv_close”) or 0)
+drop_5d  = float(candidate.get(“drop_5d”) or 0)
+rel_vol  = float(candidate.get(“rel_vol”) or 0)
+day_chg  = float(candidate.get(“day_chg”) or 0)
+sma10    = float(candidate.get(“SMA10”) or 0)
+sma20    = float(candidate.get(“SMA20”) or 0)
+atr      = float(candidate.get(“ATR”) or 0)
 
-    if tv_close <= 0:
-        return None
+```
+if tv_close <= 0:
+    return None
 
-    consec_down  = 0
-    prior_high   = None
-    drop_from_high = None
-    avg_vol      = None
+consec_down  = 0
+prior_high   = None
+drop_from_high = None
+avg_vol      = None
 
-    try:
-        df = yf.download(ticker, period="3mo", interval="1d",
-                         progress=False, auto_adjust=False)
-        if not df.empty:
-            if isinstance(df.columns, pd.MultiIndex):
-                df.columns = df.columns.get_level_values(0)
-            close_col = "Close" if "Close" in df.columns else "Adj Close"
-            high_col  = "High"
-            if all(c in df.columns for c in [close_col, "Volume"]):
-                closes  = df[close_col].squeeze().dropna()
-                volumes = df["Volume"].squeeze()
-                highs   = df[high_col].squeeze() if high_col in df.columns else closes
+try:
+    df = yf.download(ticker, period="3mo", interval="1d",
+                     progress=False, auto_adjust=False)
+    if not df.empty:
+        if isinstance(df.columns, pd.MultiIndex):
+            df.columns = df.columns.get_level_values(0)
+        close_col = "Close" if "Close" in df.columns else "Adj Close"
+        high_col  = "High"
+        if all(c in df.columns for c in [close_col, "Volume"]):
+            closes  = df[close_col].squeeze().dropna()
+            volumes = df["Volume"].squeeze()
+            highs   = df[high_col].squeeze() if high_col in df.columns else closes
 
-                if len(volumes) >= 5:
-                    avg_vol = float(volumes.tail(20).mean())
+            if len(volumes) >= 5:
+                avg_vol = float(volumes.tail(20).mean())
 
-                # Count consecutive down days before today
-                if len(closes) >= 3:
-                    for i in range(len(closes) - 2, 0, -1):
-                        if float(closes.iloc[i]) < float(closes.iloc[i - 1]):
-                            consec_down += 1
-                        else:
-                            break
+            # Count consecutive down days before today
+            if len(closes) >= 3:
+                for i in range(len(closes) - 2, 0, -1):
+                    if float(closes.iloc[i]) < float(closes.iloc[i - 1]):
+                        consec_down += 1
+                    else:
+                        break
 
-                # Prior high in the past 3 months → how far did it drop?
-                if len(highs) >= 10:
-                    prior_high   = float(highs.tail(65).max())
-                    drop_from_high = round((tv_close - prior_high) / prior_high * 100, 1)
+            # Prior high in the past 3 months → how far did it drop?
+            if len(highs) >= 10:
+                prior_high   = float(highs.tail(65).max())
+                drop_from_high = round((tv_close - prior_high) / prior_high * 100, 1)
 
-    except Exception:
-        pass
+except Exception:
+    pass
 
-    if avg_vol is not None and avg_vol >= 1_000_000:
-        avg_vol_disp = f"{avg_vol/1_000_000:.1f}M"
-    elif avg_vol is not None and avg_vol >= 1_000:
-        avg_vol_disp = f"{avg_vol/1_000:.0f}K"
-    else:
-        avg_vol_disp = "N/A"
+if avg_vol is not None and avg_vol >= 1_000_000:
+    avg_vol_disp = f"{avg_vol/1_000_000:.1f}M"
+elif avg_vol is not None and avg_vol >= 1_000:
+    avg_vol_disp = f"{avg_vol/1_000:.0f}K"
+else:
+    avg_vol_disp = "N/A"
 
-    # Bounce score: sharper drop + more down days + higher vol = more coiled spring
-    speed_score   = min(abs(drop_5d) / 5, 10)          # 50% drop in 5d = 10
-    streak_score  = min(consec_down * 1.5, 10)
-    vol_score     = min((rel_vol - 1) * 3, 10)
-    bounce_score  = round((speed_score * 0.4 + streak_score * 0.3 + vol_score * 0.3), 1)
+# Bounce score: sharper drop + more down days + higher vol = more coiled spring
+speed_score   = min(abs(drop_5d) / 5, 10)          # 50% drop in 5d = 10
+streak_score  = min(consec_down * 1.5, 10)
+vol_score     = min((rel_vol - 1) * 3, 10)
+bounce_score  = round((speed_score * 0.4 + streak_score * 0.3 + vol_score * 0.3), 1)
 
-    # Distance from MAs — below both = more room to snap back
-    dist_10 = round((tv_close - sma10) / sma10 * 100, 1) if sma10 > 0 else None
-    dist_20 = round((tv_close - sma20) / sma20 * 100, 1) if sma20 > 0 else None
+# Distance from MAs — below both = more room to snap back
+dist_10 = round((tv_close - sma10) / sma10 * 100, 1) if sma10 > 0 else None
+dist_20 = round((tv_close - sma20) / sma20 * 100, 1) if sma20 > 0 else None
 
-    return {
-        "ticker":           ticker,
-        "price":            round(tv_close, 2),
-        "day_chg":          round(day_chg, 2),
-        "drop_5d":          round(drop_5d, 1),
-        "drop_1m":          round(float(candidate.get("drop_1m") or 0), 1),
-        "drop_from_high":   drop_from_high,
-        "consec_down":      consec_down,
-        "rel_vol":          round(rel_vol, 2),
-        "avg_vol":          avg_vol_disp,
-        "bounce_score":     bounce_score,
-        "dist_10":          dist_10,
-        "dist_20":          dist_20,
-        "atr":              round(atr, 2),
-        "is_etf":           candidate["is_etf"],
-        "exchange":         candidate["exchange"],
-    }
-
+return {
+    "ticker":           ticker,
+    "price":            round(tv_close, 2),
+    "day_chg":          round(day_chg, 2),
+    "drop_5d":          round(drop_5d, 1),
+    "drop_1m":          round(float(candidate.get("drop_1m") or 0), 1),
+    "drop_from_high":   drop_from_high,
+    "consec_down":      consec_down,
+    "rel_vol":          round(rel_vol, 2),
+    "avg_vol":          avg_vol_disp,
+    "bounce_score":     bounce_score,
+    "dist_10":          dist_10,
+    "dist_20":          dist_20,
+    "atr":              round(atr, 2),
+    "is_etf":           candidate["is_etf"],
+    "exchange":         candidate["exchange"],
+}
+```
 
 def run_parabolic_long_scan(min_drop_5d, min_price, asset_filter, exchange_filter,
-                             min_vol, mcap_tiers, workers, p1_cb, p2_cb):
-    candidates, err = phase1_parabolic_long(min_drop_5d, min_vol, min_price,
-                                             asset_filter, exchange_filter, mcap_tiers)
-    if err:
-        p1_cb(f"Phase 1 warning: {err}", 0)
-        candidates = []
-    p1_cb(None, len(candidates))
-    if not candidates:
-        return []
+min_vol, mcap_tiers, workers, p1_cb, p2_cb):
+candidates, err = phase1_parabolic_long(min_drop_5d, min_vol, min_price,
+asset_filter, exchange_filter, mcap_tiers)
+if err:
+p1_cb(f”Phase 1 warning: {err}”, 0)
+candidates = []
+p1_cb(None, len(candidates))
+if not candidates:
+return []
 
-    total, done, results = len(candidates), 0, []
-    with ThreadPoolExecutor(max_workers=workers) as ex:
-        futs = {ex.submit(phase2_pl_confirm, c, min_vol): c for c in candidates}
-        for fut in as_completed(futs):
-            done += 1
-            p2_cb(done / total, done, total)
-            res = fut.result()
-            if res:
-                results.append(res)
-    return sorted(results, key=lambda x: x["bounce_score"], reverse=True)
-
+```
+total, done, results = len(candidates), 0, []
+with ThreadPoolExecutor(max_workers=workers) as ex:
+    futs = {ex.submit(phase2_pl_confirm, c, min_vol): c for c in candidates}
+    for fut in as_completed(futs):
+        done += 1
+        p2_cb(done / total, done, total)
+        res = fut.result()
+        if res:
+            results.append(res)
+return sorted(results, key=lambda x: x["bounce_score"], reverse=True)
+```
 
 # ─────────────────────────────────────────────────────────────────────────────
-#  SIDEBAR
+
+# SIDEBAR
+
 # ─────────────────────────────────────────────────────────────────────────────
+
 with st.sidebar:
-    st.markdown("""
-    <p style="font-family:'Geist Mono',monospace;font-size:1rem;font-weight:700;
-    color:#e2e8f0;letter-spacing:-0.01em;margin:0 0 0.15rem">◈ ATR Screener</p>
-    <p style="font-family:'Geist Mono',monospace;font-size:0.58rem;color:#3d4f6b;
-    letter-spacing:0.13em;margin:0 0 0.8rem">TWO-PHASE · TV + YFINANCE</p>
-    """, unsafe_allow_html=True)
+st.markdown(”””
+<p style="font-family:'Geist Mono',monospace;font-size:1rem;font-weight:700;
+color:#e2e8f0;letter-spacing:-0.01em;margin:0 0 0.15rem">◈ ATR Screener</p>
+<p style="font-family:'Geist Mono',monospace;font-size:0.58rem;color:#3d4f6b;
+letter-spacing:0.13em;margin:0 0 0.8rem">TWO-PHASE · TV + YFINANCE</p>
+“””, unsafe_allow_html=True)
 
-    st.markdown('<span class="sec-label">Thresholds</span>', unsafe_allow_html=True)
-    min_price    = st.number_input("Min Price ($)",        value=100.0, step=10.0, min_value=0.0)
-    min_atr_mult = st.number_input("Min ATR Multiple (×)", value=10.0,  step=0.5,  min_value=0.5)
-
-    st.markdown('<span class="sec-label">Indicators</span>', unsafe_allow_html=True)
-    sma_period = st.number_input("SMA Period", value=50, step=5,  min_value=5,  max_value=200)
-    atr_period = st.number_input("ATR Period", value=14, step=1,  min_value=5,  max_value=50)
-
-    st.markdown('<span class="sec-label">Universe</span>', unsafe_allow_html=True)
-    asset_filter = st.radio(
-        "Asset Type",
-        ["Stocks + ETFs", "ETFs Only", "Stocks Only"],
-        index=0, label_visibility="collapsed",
-    )
-    exchange_opts   = ["NASDAQ", "NYSE", "NYSE Arca", "NYSE American", "BATS", "IEX"]
-    exchange_filter = st.multiselect(
-        "Exchanges", exchange_opts, default=exchange_opts,
-        label_visibility="collapsed",
-    )
-    st.markdown("""
-    <p style='font-family:"Geist Mono",monospace;font-size:0.6rem;font-weight:600;
-    letter-spacing:0.14em;color:#3d4f6b;text-transform:uppercase;
-    margin:0.9rem 0 0.3rem;display:block'>Market Cap</p>
-    <p style='font-family:"Geist Mono",monospace;font-size:0.6rem;color:#3d4f6b;
-    margin:0 0 0.4rem'>
-    Micro &lt;$300M &nbsp;·&nbsp; Small $300M–$2B<br>
-    Mid $2B–$10B &nbsp;·&nbsp; Large $10B–$200B<br>
-    Mega &gt;$200B
-    </p>
-    """, unsafe_allow_html=True)
-    mcap_tiers = st.multiselect(
-        "Market Cap Tiers",
-        ["All", "Micro", "Small", "Mid", "Large", "Mega"],
-        default=["All"],
-        label_visibility="collapsed",
-    )
-    # If "All" is selected alongside others, treat as All
-    if "All" in mcap_tiers or not mcap_tiers:
-        mcap_tiers = ["All"]
-
-    min_vol = st.number_input(
-        "Min Avg Volume", value=500_000, step=100_000, min_value=0,
-        help="Filters warrants, ghost tickers, and illiquid symbols",
-    )
-
-    st.markdown('<span class="sec-label">Performance</span>', unsafe_allow_html=True)
-    workers = st.slider("Workers", 1, 15, 6, label_visibility="collapsed")
-    st.markdown(
-        f"<p style='font-family:\"Geist Mono\",monospace;font-size:0.63rem;"
-        f"color:#3d4f6b'>{workers} parallel workers (Phase 2 only)</p>",
-        unsafe_allow_html=True,
-    )
-
-    # Guide content moved to Playbook tab
-
-    st.markdown('<span class="sec-label">Parabolic Long</span>', unsafe_allow_html=True)
-    min_drop_pl = st.number_input("Min 5D Drop %", value=30.0, step=5.0, min_value=10.0, key="pl_drop",
-                                   help="Stock must be down at least this much in 5 days")
-
-    st.markdown('<span class="sec-label">Episodic Pivot</span>', unsafe_allow_html=True)
-    min_gap_ep = st.number_input("Min Gap %", value=10.0, step=1.0, min_value=3.0, key="ep_gap")
-
-    st.markdown('<span class="sec-label">Momentum Breakout</span>', unsafe_allow_html=True)
-    min_perf_bo = st.number_input("Min 1M Gain %", value=25.0, step=5.0, min_value=5.0, key="bo_perf")
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-#  MAIN — TABBED LAYOUT
-# ─────────────────────────────────────────────────────────────────────────────
+```
+st.markdown('<span class="sec-label">Universe</span>', unsafe_allow_html=True)
+min_price = st.number_input("Min Price ($)", value=10.0, step=5.0, min_value=0.0,
+                             help="Applied to all scanners")
+asset_filter = st.radio(
+    "Asset Type",
+    ["Stocks + ETFs", "ETFs Only", "Stocks Only"],
+    index=0, label_visibility="collapsed",
+)
+exchange_opts   = ["NASDAQ", "NYSE", "NYSE Arca", "NYSE American", "BATS", "IEX"]
+exchange_filter = st.multiselect(
+    "Exchanges", exchange_opts, default=exchange_opts,
+    label_visibility="collapsed",
+)
 st.markdown("""
+<p style='font-family:"Geist Mono",monospace;font-size:0.6rem;font-weight:600;
+letter-spacing:0.14em;color:#3d4f6b;text-transform:uppercase;
+margin:0.9rem 0 0.3rem;display:block'>Market Cap</p>
+<p style='font-family:"Geist Mono",monospace;font-size:0.6rem;color:#3d4f6b;
+margin:0 0 0.4rem'>
+Micro &lt;$300M &nbsp;·&nbsp; Small $300M–$2B<br>
+Mid $2B–$10B &nbsp;·&nbsp; Large $10B–$200B<br>
+Mega &gt;$200B
+</p>
+""", unsafe_allow_html=True)
+mcap_tiers = st.multiselect(
+    "Market Cap Tiers",
+    ["All", "Micro", "Small", "Mid", "Large", "Mega"],
+    default=["All"],
+    label_visibility="collapsed",
+)
+if "All" in mcap_tiers or not mcap_tiers:
+    mcap_tiers = ["All"]
+
+min_vol = st.number_input(
+    "Min Avg Volume", value=500_000, step=100_000, min_value=0,
+    help="Filters warrants, ghost tickers, and illiquid symbols",
+)
+
+st.markdown('<span class="sec-label">System</span>', unsafe_allow_html=True)
+workers = st.slider("Workers", 1, 15, 6, label_visibility="collapsed")
+st.markdown(
+    f"<p style='font-family:\"Geist Mono\",monospace;font-size:0.63rem;"
+    f"color:#3d4f6b'>{workers} parallel workers (Phase 2 only)</p>",
+    unsafe_allow_html=True,
+)
+
+# Setup-specific defaults (used if tabs haven't rendered their inputs yet)
+if "ps_atr_mult" not in st.session_state:  st.session_state["ps_atr_mult"] = 10.0
+if "ps_sma_period" not in st.session_state: st.session_state["ps_sma_period"] = 50
+if "ps_atr_period" not in st.session_state: st.session_state["ps_atr_period"] = 14
+if "pl_drop" not in st.session_state:       st.session_state["pl_drop"] = 30.0
+if "ep_gap" not in st.session_state:        st.session_state["ep_gap"] = 10.0
+if "bo_perf" not in st.session_state:       st.session_state["bo_perf"] = 25.0
+```
+
+# ─────────────────────────────────────────────────────────────────────────────
+
+# MAIN — TABBED LAYOUT
+
+# ─────────────────────────────────────────────────────────────────────────────
+
+st.markdown(”””
+
 <div class="page-header">
   <div class="page-title">◈ Qullamaggie <span>Screener</span></div>
   <div class="page-sub">PARABOLIC SHORT  ·  EPISODIC PIVOT  ·  MOMENTUM BREAKOUT  ·  TV + WILDER ATR</div>
 </div>
 """, unsafe_allow_html=True)
 
+# Resolve PS-specific params from session_state (set by tab widgets, fallback to defaults)
+
+sma_period   = int(st.session_state.get(“ps_sma_period”, 50))
+atr_period   = int(st.session_state.get(“ps_atr_period”, 14))
+min_atr_mult = float(st.session_state.get(“ps_atr_mult”,  10.0))
+
 tab_ps, tab_ep, tab_bo, tab_pl, tab_guide = st.tabs([
-    "📉  Parabolic Short",
-    "⚡  Episodic Pivot",
-    "🚀  Momentum Breakout",
-    "📈  Parabolic Long",
-    "📖  Playbook",
+“📉  Parabolic Short”,
+“⚡  Episodic Pivot”,
+“🚀  Momentum Breakout”,
+“📈  Parabolic Long”,
+“📖  Playbook”,
 ])
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  SHARED HELPERS for card/results display
+
+# SHARED HELPERS for card/results display
+
 # ══════════════════════════════════════════════════════════════════════════════
+
 def _status_row(label_a, label_b):
-    st.markdown(f"""
+st.markdown(f”””
+
 <div class="status-row">
   <span class="status-kv"><span class="pulse"></span>READY</span>
   <span class="status-kv">PHASE 1 <b>TradingView API</b></span>
@@ -1415,22 +1451,28 @@ def _status_row(label_a, label_b):
 """, unsafe_allow_html=True)
 
 def _run_phase_ui(scan_fn, scan_kwargs, state_key):
-    """Run a two-phase scan showing progress UI, store in session_state."""
-    ph1 = st.empty(); ph2b = st.empty(); ph2p = st.empty(); ph2i = st.empty()
-    p1n = [0]; p1w = [None]
+“”“Run a two-phase scan showing progress UI, store in session_state.”””
+ph1 = st.empty(); ph2b = st.empty(); ph2p = st.empty(); ph2i = st.empty()
+p1n = [0]; p1w = [None]
 
-    def p1_cb(warn, n):
-        p1n[0] = n; p1w[0] = warn
-        status = f"<b>{n}</b> candidates" if n else "no candidates"
-        ph1.markdown(f"""
+```
+def p1_cb(warn, n):
+    p1n[0] = n; p1w[0] = warn
+    status = f"<b>{n}</b> candidates" if n else "no candidates"
+    ph1.markdown(f"""
+```
+
 <div class="phase-banner">
   <span class="phase-num done">P1</span>
   <span class="phase-label">TradingView pre-screen complete</span>
   <span class="phase-detail">{status}</span>
 </div>""", unsafe_allow_html=True)
 
-    def p2_cb(pct, done, total):
-        ph2b.markdown(f"""
+```
+def p2_cb(pct, done, total):
+    ph2b.markdown(f"""
+```
+
 <div class="phase-banner">
   <span class="phase-num active">P2</span>
   <span class="phase-label">yfinance confirmation</span>
@@ -1439,15 +1481,21 @@ def _run_phase_ui(scan_fn, scan_kwargs, state_key):
         ph2p.progress(min(pct, 1.0))
         ph2i.markdown(f"<span style='font-family:\"Geist Mono\",monospace;font-size:0.7rem;color:#607080'>Validating {done:,} / {total:,}…</span>", unsafe_allow_html=True)
 
-    ph1.markdown("""
+```
+ph1.markdown("""
+```
+
 <div class="phase-banner">
   <span class="phase-num active">P1</span>
   <span class="phase-label">Querying <b>TradingView</b>…</span>
 </div>""", unsafe_allow_html=True)
 
-    results = scan_fn(p1_cb, p2_cb) if not scan_kwargs else scan_fn(**scan_kwargs, p1_cb=p1_cb, p2_cb=p2_cb)
-    ph2p.empty(); ph2i.empty()
-    ph2b.markdown(f"""
+```
+results = scan_fn(p1_cb, p2_cb) if not scan_kwargs else scan_fn(**scan_kwargs, p1_cb=p1_cb, p2_cb=p2_cb)
+ph2p.empty(); ph2i.empty()
+ph2b.markdown(f"""
+```
+
 <div class="phase-banner">
   <span class="phase-num done">P2</span>
   <span class="phase-label">Confirmation complete</span>
@@ -1459,18 +1507,19 @@ def _run_phase_ui(scan_fn, scan_kwargs, state_key):
     st.session_state[f"{state_key}_p1n"] = p1n[0]
     return results
 
-def _show_chart_panel(state_prefix):
-    """Render TradingView chart panel for a given tab."""
-    ct = st.session_state.get(f"chart_ticker_{state_prefix}")
-    ce = st.session_state.get(f"chart_exchange_{state_prefix}")
-    if not ct:
-        return
-    cl_col, _ = st.columns([1, 11])
-    if cl_col.button("✕  Close", key=f"close_chart_{state_prefix}"):
-        st.session_state[f"chart_ticker_{state_prefix}"]  = None
-        st.session_state[f"chart_exchange_{state_prefix}"] = None
-        st.rerun()
-    st.markdown(f"""
+def *show_chart_panel(state_prefix):
+“”“Render TradingView chart panel for a given tab.”””
+ct = st.session_state.get(f”chart_ticker*{state_prefix}”)
+ce = st.session_state.get(f”chart_exchange_{state_prefix}”)
+if not ct:
+return
+cl_col, _ = st.columns([1, 11])
+if cl_col.button(“✕  Close”, key=f”close_chart_{state_prefix}”):
+st.session_state[f”chart_ticker_{state_prefix}”]  = None
+st.session_state[f”chart_exchange_{state_prefix}”] = None
+st.rerun()
+st.markdown(f”””
+
 <div class="chart-header">
   <span class="chart-ticker-label">{ct}</span>
   <span class="chart-meta">{tv_symbol(ct, ce)}  ·  Daily  ·  SMA10 + SMA20 + SMA50 + ATR</span>
@@ -1478,13 +1527,19 @@ def _show_chart_panel(state_prefix):
     st_components.html(render_tv_chart(ct, ce), height=540, scrolling=False)
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  TAB 1 — PARABOLIC SHORT
-# ══════════════════════════════════════════════════════════════════════════════
-with tab_ps:
-    _status_row("Parabolic Short", "Wilder ATR confirm")
 
-    # Sector heatmap
-    st.markdown("""
+# TAB 1 — PARABOLIC SHORT
+
+# ══════════════════════════════════════════════════════════════════════════════
+
+with tab_ps:
+_status_row(“Parabolic Short”, “Wilder ATR confirm”)
+
+```
+# Sector heatmap
+st.markdown("""
+```
+
 <div style="display:flex;align-items:baseline;gap:0.75rem;margin-bottom:0.6rem">
   <span style="font-family:'Geist Mono',monospace;font-size:0.6rem;font-weight:600;
   letter-spacing:0.14em;color:#3d4f6b;text-transform:uppercase">Sector Extension Heatmap</span>
@@ -1493,20 +1548,23 @@ with tab_ps:
 </div>
 """, unsafe_allow_html=True)
 
-    with st.spinner(""):
-        sectors = fetch_sector_heatmap(int(sma_period), int(atr_period))
+```
+with st.spinner(""):
+    sectors = fetch_sector_heatmap(int(sma_period), int(atr_period))
 
-    if sectors:
-        max_mult = max(s["mult"] for s in sectors) if sectors else 15.0
-        sector_html = '<div class="sector-grid">'
-        for s in sectors:
-            hc  = sector_heat_class(s["mult"])
-            bc  = sector_bar_color(s["mult"])
-            bp  = sector_bar_pct(s["mult"], max(max_mult, 1))
-            sgn = "+" if s["day_chg"] >= 0 else ""
-            chg_col = "var(--green)" if s["day_chg"] >= 0 else "var(--red)"
-            mult_disp = f"{s['mult']}×" if s["mult"] > 0 else "—"
-            sector_html += f"""
+if sectors:
+    max_mult = max(s["mult"] for s in sectors) if sectors else 15.0
+    sector_html = '<div class="sector-grid">'
+    for s in sectors:
+        hc  = sector_heat_class(s["mult"])
+        bc  = sector_bar_color(s["mult"])
+        bp  = sector_bar_pct(s["mult"], max(max_mult, 1))
+        sgn = "+" if s["day_chg"] >= 0 else ""
+        chg_col = "var(--green)" if s["day_chg"] >= 0 else "var(--red)"
+        mult_disp = f"{s['mult']}×" if s["mult"] > 0 else "—"
+        sector_html += f"""
+```
+
 <div class="sector-card {hc}">
   <div class="sector-name">{s['sector']}</div>
   <div class="sector-mult" style="color:{bc}">{mult_disp} ATR</div>
@@ -1530,35 +1588,44 @@ with tab_ps:
 Also elevated: {others_txt}
 </p>""", unsafe_allow_html=True)
 
-    ps_btn_col, ps_dl_col, _ = st.columns([1, 1, 7])
-    run_ps = ps_btn_col.button("▶  RUN SCAN", key="run_ps")
+```
+# ── Setup-specific controls ──────────────────────────────────────────────
+ps_c1, ps_c2, ps_c3, ps_c4 = st.columns(4)
+min_atr_mult = ps_c1.number_input("Min ATR Multiple (×)", value=10.0, step=0.5, min_value=0.5, key="ps_atr_mult")
+sma_period   = ps_c2.number_input("SMA Period",            value=50,   step=5,   min_value=5, max_value=200, key="ps_sma_period")
+atr_period   = ps_c3.number_input("ATR Period",            value=14,   step=1,   min_value=5, max_value=50,  key="ps_atr_period")
 
-    _show_chart_panel("ps")
+ps_btn_col, ps_dl_col, _ = st.columns([1, 1, 7])
+run_ps = ps_btn_col.button("▶  RUN SCAN", key="run_ps")
 
-    if run_ps:
-        results_ps = _run_phase_ui(
-            lambda p1_cb, p2_cb: run_two_phase_scan(
-                min_price, min_atr_mult,
-                int(sma_period), int(atr_period),
-                asset_filter, exchange_filter,
-                workers, int(min_vol), mcap_tiers,
-                p1_cb, p2_cb,
-            ),
-            {},
-            "results_ps",
-        )
+_show_chart_panel("ps")
 
-    if "results_ps" in st.session_state:
-        results  = st.session_state["results_ps"]
-        scan_ts  = st.session_state.get("results_ps_ts", "")
-        n_hits   = len(results)
+if run_ps:
+    results_ps = _run_phase_ui(
+        lambda p1_cb, p2_cb: run_two_phase_scan(
+            min_price, min_atr_mult,
+            int(sma_period), int(atr_period),
+            asset_filter, exchange_filter,
+            workers, int(min_vol), mcap_tiers,
+            p1_cb, p2_cb,
+        ),
+        {},
+        "results_ps",
+    )
 
-        top_mult  = f"{results[0]['atr_mult']}×" if results else "—"
-        n_etf_hit = sum(1 for r in results if r["is_etf"])
-        n_stk_hit = n_hits - n_etf_hit
-        p1_count  = st.session_state.get("results_ps_p1n", "—")
+if "results_ps" in st.session_state:
+    results  = st.session_state["results_ps"]
+    scan_ts  = st.session_state.get("results_ps_ts", "")
+    n_hits   = len(results)
 
-        st.markdown(f"""
+    top_mult  = f"{results[0]['atr_mult']}×" if results else "—"
+    n_etf_hit = sum(1 for r in results if r["is_etf"])
+    n_stk_hit = n_hits - n_etf_hit
+    p1_count  = st.session_state.get("results_ps_p1n", "—")
+
+    st.markdown(f"""
+```
+
 <div class="metric-row">
   <div class="metric-box hi"><div class="metric-label">Confirmed Hits</div>
     <div class="metric-value amber">{n_hits}</div>
@@ -1574,13 +1641,16 @@ Also elevated: {others_txt}
     <div class="metric-sub">Phase 1 pre-screen</div></div>
 </div>""", unsafe_allow_html=True)
 
-        if results:
-            df_exp = pd.DataFrame(results)
-            ps_dl_col.download_button("↓ CSV", data=df_exp.to_csv(index=False).encode(),
-                file_name=f"ps_{datetime.now().strftime('%Y%m%d_%H%M')}.csv", mime="text/csv")
+```
+    if results:
+        df_exp = pd.DataFrame(results)
+        ps_dl_col.download_button("↓ CSV", data=df_exp.to_csv(index=False).encode(),
+            file_name=f"ps_{datetime.now().strftime('%Y%m%d_%H%M')}.csv", mime="text/csv")
 
-        if not results:
-            st.markdown("""
+    if not results:
+        st.markdown("""
+```
+
 <div class="empty-state">
   <div class="empty-icon">◈</div>
   <div class="empty-text">No confirmed parabolic short candidates</div>
@@ -1592,31 +1662,34 @@ Also elevated: {others_txt}
                 if m >= 10: return "atr-high"
                 return "atr-norm"
 
-            if "chart_ticker_ps" not in st.session_state:
-                st.session_state["chart_ticker_ps"]   = None
-                st.session_state["chart_exchange_ps"] = None
+```
+        if "chart_ticker_ps" not in st.session_state:
+            st.session_state["chart_ticker_ps"]   = None
+            st.session_state["chart_exchange_ps"] = None
 
-            COLS = 3
-            for i in range(0, len(results), COLS):
-                chunk = results[i:i + COLS]
-                cols  = st.columns(COLS)
-                for col, r in zip(cols, chunk):
-                    day_chg_val  = round(float(r["day_chg"]), 2)
-                    chg_cls      = "pos" if day_chg_val >= 0 else "neg"
-                    chg_sign     = "+" if day_chg_val >= 0 else ""
-                    type_lbl     = "ETF" if r["is_etf"] else "STOCK"
-                    type_cls     = "tag-etf" if r["is_etf"] else "tag-stock"
-                    gain_5d_val  = round(float(r["gain_5d"]), 1)
-                    gain_cls     = "pos" if gain_5d_val >= 0 else "neg"
-                    gain_sign    = "+" if gain_5d_val >= 0 else ""
-                    rvol_cls     = "warn" if r["rel_vol"] >= 2 else ""
-                    streak       = int(r["consec_days"])
-                    badge_day1   = '<span class="tag tag-day1">⚠ DAY 1</span>' if r["is_day1"] else ""
-                    badge_streak = f'<span class="tag tag-streak">🔥 {streak}d</span>' if streak >= 3 else ""
-                    badge_rvol   = f'<span class="tag tag-rvol">RVOL {r["rel_vol"]}×</span>' if r["rel_vol"] >= 1.5 else ""
-                    atr_badge    = atr_cls(r["atr_mult"])
-                    btn_key      = f"ps_chart_{r['ticker']}_{i}"
-                    col.markdown(f"""
+        COLS = 3
+        for i in range(0, len(results), COLS):
+            chunk = results[i:i + COLS]
+            cols  = st.columns(COLS)
+            for col, r in zip(cols, chunk):
+                day_chg_val  = round(float(r["day_chg"]), 2)
+                chg_cls      = "pos" if day_chg_val >= 0 else "neg"
+                chg_sign     = "+" if day_chg_val >= 0 else ""
+                type_lbl     = "ETF" if r["is_etf"] else "STOCK"
+                type_cls     = "tag-etf" if r["is_etf"] else "tag-stock"
+                gain_5d_val  = round(float(r["gain_5d"]), 1)
+                gain_cls     = "pos" if gain_5d_val >= 0 else "neg"
+                gain_sign    = "+" if gain_5d_val >= 0 else ""
+                rvol_cls     = "warn" if r["rel_vol"] >= 2 else ""
+                streak       = int(r["consec_days"])
+                badge_day1   = '<span class="tag tag-day1">⚠ DAY 1</span>' if r["is_day1"] else ""
+                badge_streak = f'<span class="tag tag-streak">🔥 {streak}d</span>' if streak >= 3 else ""
+                badge_rvol   = f'<span class="tag tag-rvol">RVOL {r["rel_vol"]}×</span>' if r["rel_vol"] >= 1.5 else ""
+                atr_badge    = atr_cls(r["atr_mult"])
+                btn_key      = f"ps_chart_{r['ticker']}_{i}"
+                col.markdown(f"""
+```
+
 <div class="card">
   <span class="atr-badge {atr_badge}">{r['atr_mult']}×</span>
   <div class="card-ticker">{r['ticker']}</div>
@@ -1644,18 +1717,21 @@ Also elevated: {others_txt}
                         st.session_state["chart_exchange_ps"] = r["exchange"]
                         st.rerun()
 
-            with st.expander(f"▸  Full Results  ({n_hits} rows)"):
-                disp = pd.DataFrame(results).rename(columns={
-                    "ticker": "Ticker", "exchange": "Exchange", "is_etf": "ETF",
-                    "price": "Price", "atr_mult": "ATR×", "pct_sma": "% Above SMA (B)",
-                    "day_chg": "Day Chg %", "avg_vol": "Avg Volume",
-                    "consec_days": "Streak (days)", "gain_5d": "5D Gain %",
-                    "gain_1m": "1M Gain %", "rel_vol": "Rel Vol",
-                    "tv_gap": "Gap %", "is_day1": "Day 1?",
-                })
-                st.dataframe(disp, use_container_width=True, hide_index=True)
-    else:
-        st.markdown("""
+```
+        with st.expander(f"▸  Full Results  ({n_hits} rows)"):
+            disp = pd.DataFrame(results).rename(columns={
+                "ticker": "Ticker", "exchange": "Exchange", "is_etf": "ETF",
+                "price": "Price", "atr_mult": "ATR×", "pct_sma": "% Above SMA (B)",
+                "day_chg": "Day Chg %", "avg_vol": "Avg Volume",
+                "consec_days": "Streak (days)", "gain_5d": "5D Gain %",
+                "gain_1m": "1M Gain %", "rel_vol": "Rel Vol",
+                "tv_gap": "Gap %", "is_day1": "Day 1?",
+            })
+            st.dataframe(disp, use_container_width=True, hide_index=True)
+else:
+    st.markdown("""
+```
+
 <div class="empty-state" style="margin-top:3rem">
   <div class="empty-icon">📉</div>
   <div class="empty-text">Parabolic Short Scanner</div>
@@ -1663,37 +1739,45 @@ Also elevated: {others_txt}
 </div>""", unsafe_allow_html=True)
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  TAB 2 — EPISODIC PIVOT
+
+# TAB 2 — EPISODIC PIVOT
+
 # ══════════════════════════════════════════════════════════════════════════════
+
 with tab_ep:
-    _status_row("Episodic Pivot", "yfinance enrich")
+_status_row(“Episodic Pivot”, “yfinance enrich”)
 
-    ep_btn_col, ep_dl_col, _ = st.columns([1, 1, 7])
-    run_ep = ep_btn_col.button("▶  RUN SCAN", key="run_ep")
+```
+ep_c1, ep_c2, _ = st.columns([1, 1, 5])
+min_gap_ep = ep_c1.number_input("Min Gap %", value=10.0, step=1.0, min_value=3.0, key="ep_gap")
+ep_btn_col, ep_dl_col, _ = st.columns([1, 1, 7])
+run_ep = ep_btn_col.button("▶  RUN SCAN", key="run_ep")
 
-    _show_chart_panel("ep")
+_show_chart_panel("ep")
 
-    if run_ep:
-        results_ep = _run_phase_ui(
-            lambda p1_cb, p2_cb: run_ep_scan(
-                min_gap_ep, min_price, asset_filter, exchange_filter,
-                int(min_vol), mcap_tiers, workers, p1_cb, p2_cb,
-            ),
-            {},
-            "results_ep",
-        )
+if run_ep:
+    results_ep = _run_phase_ui(
+        lambda p1_cb, p2_cb: run_ep_scan(
+            min_gap_ep, min_price, asset_filter, exchange_filter,
+            int(min_vol), mcap_tiers, workers, p1_cb, p2_cb,
+        ),
+        {},
+        "results_ep",
+    )
 
-    if "results_ep" in st.session_state:
-        results  = st.session_state["results_ep"]
-        scan_ts  = st.session_state.get("results_ep_ts", "")
-        n_hits   = len(results)
-        p1_count = st.session_state.get("results_ep_p1n", "—")
+if "results_ep" in st.session_state:
+    results  = st.session_state["results_ep"]
+    scan_ts  = st.session_state.get("results_ep_ts", "")
+    n_hits   = len(results)
+    p1_count = st.session_state.get("results_ep_p1n", "—")
 
-        top_gap   = f"{results[0]['gap_pct']}%" if results else "—"
-        top_rvol  = f"{results[0]['rel_vol']}×" if results else "—"
-        neglected = sum(1 for r in results if r.get("neglected"))
+    top_gap   = f"{results[0]['gap_pct']}%" if results else "—"
+    top_rvol  = f"{results[0]['rel_vol']}×" if results else "—"
+    neglected = sum(1 for r in results if r.get("neglected"))
 
-        st.markdown(f"""
+    st.markdown(f"""
+```
+
 <div class="metric-row">
   <div class="metric-box hi"><div class="metric-label">EP Signals</div>
     <div class="metric-value amber">{n_hits}</div>
@@ -1709,13 +1793,16 @@ with tab_ep:
     <div class="metric-sub">was sideways → ideal EP</div></div>
 </div>""", unsafe_allow_html=True)
 
-        if results:
-            df_exp = pd.DataFrame(results)
-            ep_dl_col.download_button("↓ CSV", data=df_exp.to_csv(index=False).encode(),
-                file_name=f"ep_{datetime.now().strftime('%Y%m%d_%H%M')}.csv", mime="text/csv")
+```
+    if results:
+        df_exp = pd.DataFrame(results)
+        ep_dl_col.download_button("↓ CSV", data=df_exp.to_csv(index=False).encode(),
+            file_name=f"ep_{datetime.now().strftime('%Y%m%d_%H%M')}.csv", mime="text/csv")
 
-        if not results:
-            st.markdown("""
+    if not results:
+        st.markdown("""
+```
+
 <div class="empty-state">
   <div class="empty-icon">⚡</div>
   <div class="empty-text">No Episodic Pivots found today</div>
@@ -1726,23 +1813,26 @@ with tab_ep:
                 st.session_state["chart_ticker_ep"]   = None
                 st.session_state["chart_exchange_ep"] = None
 
-            COLS = 3
-            for i in range(0, len(results), COLS):
-                chunk = results[i:i + COLS]
-                cols  = st.columns(COLS)
-                for col, r in zip(cols, chunk):
-                    gap_val   = r["gap_pct"]
-                    rvol_val  = r["rel_vol"]
-                    day_chg   = round(float(r["day_chg"]), 2)
-                    chg_cls   = "pos" if day_chg >= 0 else "neg"
-                    chg_sign  = "+" if day_chg >= 0 else ""
-                    type_lbl  = "ETF" if r["is_etf"] else "STOCK"
-                    type_cls  = "tag-etf" if r["is_etf"] else "tag-stock"
-                    ep_score  = r["ep_score"]
-                    score_col = "#34d399" if ep_score >= 20 else "#f59e0b" if ep_score >= 10 else "#607080"
-                    neglect_b = '<span class="tag tag-streak">🏆 NEGLECTED</span>' if r.get("neglected") else ""
-                    btn_key   = f"ep_chart_{r['ticker']}_{i}"
-                    col.markdown(f"""
+```
+        COLS = 3
+        for i in range(0, len(results), COLS):
+            chunk = results[i:i + COLS]
+            cols  = st.columns(COLS)
+            for col, r in zip(cols, chunk):
+                gap_val   = r["gap_pct"]
+                rvol_val  = r["rel_vol"]
+                day_chg   = round(float(r["day_chg"]), 2)
+                chg_cls   = "pos" if day_chg >= 0 else "neg"
+                chg_sign  = "+" if day_chg >= 0 else ""
+                type_lbl  = "ETF" if r["is_etf"] else "STOCK"
+                type_cls  = "tag-etf" if r["is_etf"] else "tag-stock"
+                ep_score  = r["ep_score"]
+                score_col = "#34d399" if ep_score >= 20 else "#f59e0b" if ep_score >= 10 else "#607080"
+                neglect_b = '<span class="tag tag-streak">🏆 NEGLECTED</span>' if r.get("neglected") else ""
+                btn_key   = f"ep_chart_{r['ticker']}_{i}"
+                col.markdown(f"""
+```
+
 <div class="card">
   <span class="atr-badge atr-norm" style="background:rgba(99,102,241,0.15);color:#818cf8;border-color:#4f46e5">EP</span>
   <div class="card-ticker">{r['ticker']}</div>
@@ -1770,17 +1860,20 @@ with tab_ep:
                         st.session_state["chart_exchange_ep"] = r["exchange"]
                         st.rerun()
 
-            with st.expander(f"▸  Full Results  ({n_hits} rows)"):
-                disp = pd.DataFrame(results).rename(columns={
-                    "ticker": "Ticker", "exchange": "Exchange", "is_etf": "ETF",
-                    "price": "Price", "gap_pct": "Gap %", "rel_vol": "Rel Vol",
-                    "day_chg": "Day Chg %", "gain_3m": "3M Prior %",
-                    "gain_6m": "6M %", "ep_score": "EP Score",
-                    "neglected": "Was Neglected", "consec_days": "Streak",
-                })
-                st.dataframe(disp, use_container_width=True, hide_index=True)
-    else:
-        st.markdown("""
+```
+        with st.expander(f"▸  Full Results  ({n_hits} rows)"):
+            disp = pd.DataFrame(results).rename(columns={
+                "ticker": "Ticker", "exchange": "Exchange", "is_etf": "ETF",
+                "price": "Price", "gap_pct": "Gap %", "rel_vol": "Rel Vol",
+                "day_chg": "Day Chg %", "gain_3m": "3M Prior %",
+                "gain_6m": "6M %", "ep_score": "EP Score",
+                "neglected": "Was Neglected", "consec_days": "Streak",
+            })
+            st.dataframe(disp, use_container_width=True, hide_index=True)
+else:
+    st.markdown("""
+```
+
 <div class="empty-state" style="margin-top:3rem">
   <div class="empty-icon">⚡</div>
   <div class="empty-text">Episodic Pivot Scanner</div>
@@ -1788,37 +1881,45 @@ with tab_ep:
 </div>""", unsafe_allow_html=True)
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  TAB 3 — MOMENTUM BREAKOUT
+
+# TAB 3 — MOMENTUM BREAKOUT
+
 # ══════════════════════════════════════════════════════════════════════════════
+
 with tab_bo:
-    _status_row("Momentum Breakout", "yfinance enrich")
+_status_row(“Momentum Breakout”, “yfinance enrich”)
 
-    bo_btn_col, bo_dl_col, _ = st.columns([1, 1, 7])
-    run_bo = bo_btn_col.button("▶  RUN SCAN", key="run_bo")
+```
+bo_c1, bo_c2, _ = st.columns([1, 1, 5])
+min_perf_bo = bo_c1.number_input("Min 1M Gain %", value=25.0, step=5.0, min_value=5.0, key="bo_perf")
+bo_btn_col, bo_dl_col, _ = st.columns([1, 1, 7])
+run_bo = bo_btn_col.button("▶  RUN SCAN", key="run_bo")
 
-    _show_chart_panel("bo")
+_show_chart_panel("bo")
 
-    if run_bo:
-        results_bo = _run_phase_ui(
-            lambda p1_cb, p2_cb: run_breakout_scan(
-                min_perf_bo, min_price, asset_filter, exchange_filter,
-                int(min_vol), mcap_tiers, workers, p1_cb, p2_cb,
-            ),
-            {},
-            "results_bo",
-        )
+if run_bo:
+    results_bo = _run_phase_ui(
+        lambda p1_cb, p2_cb: run_breakout_scan(
+            min_perf_bo, min_price, asset_filter, exchange_filter,
+            int(min_vol), mcap_tiers, workers, p1_cb, p2_cb,
+        ),
+        {},
+        "results_bo",
+    )
 
-    if "results_bo" in st.session_state:
-        results  = st.session_state["results_bo"]
-        scan_ts  = st.session_state.get("results_bo_ts", "")
-        n_hits   = len(results)
-        p1_count = st.session_state.get("results_bo_p1n", "—")
+if "results_bo" in st.session_state:
+    results  = st.session_state["results_bo"]
+    scan_ts  = st.session_state.get("results_bo_ts", "")
+    n_hits   = len(results)
+    p1_count = st.session_state.get("results_bo_p1n", "—")
 
-        top_score = f"{results[0]['setup_score']}" if results else "—"
-        tight     = sum(1 for r in results if (r.get("range_tightness") or 99) < 3)
-        near_ma   = sum(1 for r in results if (r.get("ma_proximity") or 99) < 3)
+    top_score = f"{results[0]['setup_score']}" if results else "—"
+    tight     = sum(1 for r in results if (r.get("range_tightness") or 99) < 3)
+    near_ma   = sum(1 for r in results if (r.get("ma_proximity") or 99) < 3)
 
-        st.markdown(f"""
+    st.markdown(f"""
+```
+
 <div class="metric-row">
   <div class="metric-box hi"><div class="metric-label">Setups Found</div>
     <div class="metric-value amber">{n_hits}</div>
@@ -1834,13 +1935,16 @@ with tab_bo:
     <div class="metric-sub">within 3% of 10/20 EMA</div></div>
 </div>""", unsafe_allow_html=True)
 
-        if results:
-            df_exp = pd.DataFrame(results)
-            bo_dl_col.download_button("↓ CSV", data=df_exp.to_csv(index=False).encode(),
-                file_name=f"bo_{datetime.now().strftime('%Y%m%d_%H%M')}.csv", mime="text/csv")
+```
+    if results:
+        df_exp = pd.DataFrame(results)
+        bo_dl_col.download_button("↓ CSV", data=df_exp.to_csv(index=False).encode(),
+            file_name=f"bo_{datetime.now().strftime('%Y%m%d_%H%M')}.csv", mime="text/csv")
 
-        if not results:
-            st.markdown("""
+    if not results:
+        st.markdown("""
+```
+
 <div class="empty-state">
   <div class="empty-icon">🚀</div>
   <div class="empty-text">No Momentum Breakout setups found</div>
@@ -1851,24 +1955,27 @@ with tab_bo:
                 st.session_state["chart_ticker_bo"]   = None
                 st.session_state["chart_exchange_bo"] = None
 
-            COLS = 3
-            for i in range(0, len(results), COLS):
-                chunk = results[i:i + COLS]
-                cols  = st.columns(COLS)
-                for col, r in zip(cols, chunk):
-                    day_chg   = round(float(r["day_chg"]), 2)
-                    chg_cls   = "pos" if day_chg >= 0 else "neg"
-                    chg_sign  = "+" if day_chg >= 0 else ""
-                    type_lbl  = "ETF" if r["is_etf"] else "STOCK"
-                    type_cls  = "tag-etf" if r["is_etf"] else "tag-stock"
-                    sc        = r["setup_score"]
-                    score_col = "#34d399" if sc >= 7 else "#f59e0b" if sc >= 4 else "#607080"
-                    tight_val = r.get("range_tightness") or 0
-                    tight_cls = "pos" if tight_val < 3 else "warn" if tight_val < 6 else "neg"
-                    dist20    = r.get("dist_20") or 0
-                    dist_cls  = "pos" if abs(dist20) < 3 else "warn" if abs(dist20) < 8 else "neg"
-                    btn_key   = f"bo_chart_{r['ticker']}_{i}"
-                    col.markdown(f"""
+```
+        COLS = 3
+        for i in range(0, len(results), COLS):
+            chunk = results[i:i + COLS]
+            cols  = st.columns(COLS)
+            for col, r in zip(cols, chunk):
+                day_chg   = round(float(r["day_chg"]), 2)
+                chg_cls   = "pos" if day_chg >= 0 else "neg"
+                chg_sign  = "+" if day_chg >= 0 else ""
+                type_lbl  = "ETF" if r["is_etf"] else "STOCK"
+                type_cls  = "tag-etf" if r["is_etf"] else "tag-stock"
+                sc        = r["setup_score"]
+                score_col = "#34d399" if sc >= 7 else "#f59e0b" if sc >= 4 else "#607080"
+                tight_val = r.get("range_tightness") or 0
+                tight_cls = "pos" if tight_val < 3 else "warn" if tight_val < 6 else "neg"
+                dist20    = r.get("dist_20") or 0
+                dist_cls  = "pos" if abs(dist20) < 3 else "warn" if abs(dist20) < 8 else "neg"
+                btn_key   = f"bo_chart_{r['ticker']}_{i}"
+                col.markdown(f"""
+```
+
 <div class="card">
   <span class="atr-badge atr-norm" style="background:rgba(52,211,153,0.12);color:#34d399;border-color:#059669">{sc}</span>
   <div class="card-ticker">{r['ticker']}</div>
@@ -1895,18 +2002,21 @@ with tab_bo:
                         st.session_state["chart_exchange_bo"] = r["exchange"]
                         st.rerun()
 
-            with st.expander(f"▸  Full Results  ({n_hits} rows)"):
-                disp = pd.DataFrame(results).rename(columns={
-                    "ticker": "Ticker", "exchange": "Exchange", "is_etf": "ETF",
-                    "price": "Price", "gain_1m": "1M %", "gain_3m": "3M %",
-                    "gain_6m": "6M %", "day_chg": "Day Chg %",
-                    "dist_10": "vs SMA10 %", "dist_20": "vs SMA20 %",
-                    "dist_50": "vs SMA50 %", "range_tightness": "Range Tight %",
-                    "rel_vol": "Rel Vol", "setup_score": "Setup Score",
-                })
-                st.dataframe(disp, use_container_width=True, hide_index=True)
-    else:
-        st.markdown("""
+```
+        with st.expander(f"▸  Full Results  ({n_hits} rows)"):
+            disp = pd.DataFrame(results).rename(columns={
+                "ticker": "Ticker", "exchange": "Exchange", "is_etf": "ETF",
+                "price": "Price", "gain_1m": "1M %", "gain_3m": "3M %",
+                "gain_6m": "6M %", "day_chg": "Day Chg %",
+                "dist_10": "vs SMA10 %", "dist_20": "vs SMA20 %",
+                "dist_50": "vs SMA50 %", "range_tightness": "Range Tight %",
+                "rel_vol": "Rel Vol", "setup_score": "Setup Score",
+            })
+            st.dataframe(disp, use_container_width=True, hide_index=True)
+else:
+    st.markdown("""
+```
+
 <div class="empty-state" style="margin-top:3rem">
   <div class="empty-icon">🚀</div>
   <div class="empty-text">Momentum Breakout Scanner</div>
@@ -1914,40 +2024,52 @@ with tab_bo:
 </div>""", unsafe_allow_html=True)
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  TAB 4 — PLAYBOOK (GUIDE)
+
+# TAB 4 — PLAYBOOK (GUIDE)
+
 # ══════════════════════════════════════════════════════════════════════════════
+
 # ══════════════════════════════════════════════════════════════════════════════
-#  TAB 4 — PARABOLIC LONG
+
+# TAB 4 — PARABOLIC LONG
+
 # ══════════════════════════════════════════════════════════════════════════════
+
 with tab_pl:
-    _status_row("Parabolic Long", "yfinance enrich")
+_status_row(“Parabolic Long”, “yfinance enrich”)
 
-    pl_btn_col, pl_dl_col, _ = st.columns([1, 1, 7])
-    run_pl = pl_btn_col.button("▶  RUN SCAN", key="run_pl")
+```
+pl_c1, pl_c2, _ = st.columns([1, 1, 5])
+min_drop_pl = pl_c1.number_input("Min 5D Drop %", value=30.0, step=5.0, min_value=10.0, key="pl_drop",
+                                  help="Stock must be down at least this much in 5 days")
+pl_btn_col, pl_dl_col, _ = st.columns([1, 1, 7])
+run_pl = pl_btn_col.button("▶  RUN SCAN", key="run_pl")
 
-    _show_chart_panel("pl")
+_show_chart_panel("pl")
 
-    if run_pl:
-        results_pl = _run_phase_ui(
-            lambda p1_cb, p2_cb: run_parabolic_long_scan(
-                min_drop_pl, min_price, asset_filter, exchange_filter,
-                int(min_vol), mcap_tiers, workers, p1_cb, p2_cb,
-            ),
-            {},
-            "results_pl",
-        )
+if run_pl:
+    results_pl = _run_phase_ui(
+        lambda p1_cb, p2_cb: run_parabolic_long_scan(
+            min_drop_pl, min_price, asset_filter, exchange_filter,
+            int(min_vol), mcap_tiers, workers, p1_cb, p2_cb,
+        ),
+        {},
+        "results_pl",
+    )
 
-    if "results_pl" in st.session_state:
-        results  = st.session_state["results_pl"]
-        scan_ts  = st.session_state.get("results_pl_ts", "")
-        n_hits   = len(results)
-        p1_count = st.session_state.get("results_pl_p1n", "—")
+if "results_pl" in st.session_state:
+    results  = st.session_state["results_pl"]
+    scan_ts  = st.session_state.get("results_pl_ts", "")
+    n_hits   = len(results)
+    p1_count = st.session_state.get("results_pl_p1n", "—")
 
-        top_drop  = f"{results[0]['drop_5d']}%" if results else "—"
-        top_score = f"{results[0]['bounce_score']}" if results else "—"
-        coiled    = sum(1 for r in results if r["bounce_score"] >= 7)
+    top_drop  = f"{results[0]['drop_5d']}%" if results else "—"
+    top_score = f"{results[0]['bounce_score']}" if results else "—"
+    coiled    = sum(1 for r in results if r["bounce_score"] >= 7)
 
-        st.markdown(f"""
+    st.markdown(f"""
+```
+
 <div class="metric-row">
   <div class="metric-box hi"><div class="metric-label">Bounce Candidates</div>
     <div class="metric-value amber">{n_hits}</div>
@@ -1963,13 +2085,16 @@ with tab_pl:
     <div class="metric-sub">score ≥ 7 / 10</div></div>
 </div>""", unsafe_allow_html=True)
 
-        if results:
-            df_exp = pd.DataFrame(results)
-            pl_dl_col.download_button("↓ CSV", data=df_exp.to_csv(index=False).encode(),
-                file_name=f"pl_{datetime.now().strftime('%Y%m%d_%H%M')}.csv", mime="text/csv")
+```
+    if results:
+        df_exp = pd.DataFrame(results)
+        pl_dl_col.download_button("↓ CSV", data=df_exp.to_csv(index=False).encode(),
+            file_name=f"pl_{datetime.now().strftime('%Y%m%d_%H%M')}.csv", mime="text/csv")
 
-        if not results:
-            st.markdown("""
+    if not results:
+        st.markdown("""
+```
+
 <div class="empty-state">
   <div class="empty-icon">📈</div>
   <div class="empty-text">No Parabolic Long candidates today</div>
@@ -1980,27 +2105,30 @@ with tab_pl:
                 st.session_state["chart_ticker_pl"]   = None
                 st.session_state["chart_exchange_pl"] = None
 
-            COLS = 3
-            for i in range(0, len(results), COLS):
-                chunk = results[i:i + COLS]
-                cols  = st.columns(COLS)
-                for col, r in zip(cols, chunk):
-                    day_chg   = round(float(r["day_chg"]), 2)
-                    chg_cls   = "pos" if day_chg >= 0 else "neg"
-                    chg_sign  = "+" if day_chg >= 0 else ""
-                    drop_val  = r["drop_5d"]
-                    sc        = r["bounce_score"]
-                    score_col = "#34d399" if sc >= 7 else "#f59e0b" if sc >= 4 else "#607080"
-                    type_lbl  = "ETF" if r["is_etf"] else "STOCK"
-                    type_cls  = "tag-etf" if r["is_etf"] else "tag-stock"
-                    dfh       = r.get("drop_from_high")
-                    dfh_str   = f"{dfh}%" if dfh is not None else "N/A"
-                    dist20    = r.get("dist_20") or 0
-                    dist_cls  = "neg" if dist20 < -5 else "warn" if dist20 < 0 else "pos"
-                    high_score = sc >= 7
-                    badge_coil = '<span class="tag tag-streak">🔥 COILED</span>' if high_score else ""
-                    btn_key   = f"pl_chart_{r['ticker']}_{i}"
-                    col.markdown(f"""
+```
+        COLS = 3
+        for i in range(0, len(results), COLS):
+            chunk = results[i:i + COLS]
+            cols  = st.columns(COLS)
+            for col, r in zip(cols, chunk):
+                day_chg   = round(float(r["day_chg"]), 2)
+                chg_cls   = "pos" if day_chg >= 0 else "neg"
+                chg_sign  = "+" if day_chg >= 0 else ""
+                drop_val  = r["drop_5d"]
+                sc        = r["bounce_score"]
+                score_col = "#34d399" if sc >= 7 else "#f59e0b" if sc >= 4 else "#607080"
+                type_lbl  = "ETF" if r["is_etf"] else "STOCK"
+                type_cls  = "tag-etf" if r["is_etf"] else "tag-stock"
+                dfh       = r.get("drop_from_high")
+                dfh_str   = f"{dfh}%" if dfh is not None else "N/A"
+                dist20    = r.get("dist_20") or 0
+                dist_cls  = "neg" if dist20 < -5 else "warn" if dist20 < 0 else "pos"
+                high_score = sc >= 7
+                badge_coil = '<span class="tag tag-streak">🔥 COILED</span>' if high_score else ""
+                btn_key   = f"pl_chart_{r['ticker']}_{i}"
+                col.markdown(f"""
+```
+
 <div class="card">
   <span class="atr-badge atr-norm" style="background:rgba(52,211,153,0.12);color:#34d399;border-color:#059669">{sc}</span>
   <div class="card-ticker">{r['ticker']}</div>
@@ -2028,19 +2156,22 @@ with tab_pl:
                         st.session_state["chart_exchange_pl"] = r["exchange"]
                         st.rerun()
 
-            with st.expander(f"▸  Full Results  ({n_hits} rows)"):
-                disp = pd.DataFrame(results).rename(columns={
-                    "ticker": "Ticker", "exchange": "Exchange", "is_etf": "ETF",
-                    "price": "Price", "day_chg": "Day Chg %",
-                    "drop_5d": "5D Drop %", "drop_1m": "1M Drop %",
-                    "drop_from_high": "Drop from High %",
-                    "consec_down": "Down Days", "rel_vol": "Rel Vol",
-                    "avg_vol": "Avg Volume", "bounce_score": "Bounce Score",
-                    "dist_10": "vs SMA10 %", "dist_20": "vs SMA20 %",
-                })
-                st.dataframe(disp, use_container_width=True, hide_index=True)
-    else:
-        st.markdown("""
+```
+        with st.expander(f"▸  Full Results  ({n_hits} rows)"):
+            disp = pd.DataFrame(results).rename(columns={
+                "ticker": "Ticker", "exchange": "Exchange", "is_etf": "ETF",
+                "price": "Price", "day_chg": "Day Chg %",
+                "drop_5d": "5D Drop %", "drop_1m": "1M Drop %",
+                "drop_from_high": "Drop from High %",
+                "consec_down": "Down Days", "rel_vol": "Rel Vol",
+                "avg_vol": "Avg Volume", "bounce_score": "Bounce Score",
+                "dist_10": "vs SMA10 %", "dist_20": "vs SMA20 %",
+            })
+            st.dataframe(disp, use_container_width=True, hide_index=True)
+else:
+    st.markdown("""
+```
+
 <div class="empty-state" style="margin-top:3rem">
   <div class="empty-icon">📈</div>
   <div class="empty-text">Parabolic Long Scanner</div>
@@ -2048,7 +2179,8 @@ with tab_pl:
 </div>""", unsafe_allow_html=True)
 
 with tab_guide:
-    st.markdown("""
+st.markdown(”””
+
 <style>
 .pb-hero {
   background: linear-gradient(135deg, #0e1114 0%, #111827 100%);
@@ -2215,9 +2347,12 @@ with tab_guide:
 </div>
 """, unsafe_allow_html=True)
 
-    # ── Universal Rules ────────────────────────────────────────────────────────
-    st.markdown('<div class="pb-section-hdr">Universal Principles — apply to all 3 setups</div>', unsafe_allow_html=True)
-    st.markdown("""
+```
+# ── Universal Rules ────────────────────────────────────────────────────────
+st.markdown('<div class="pb-section-hdr">Universal Principles — apply to all 3 setups</div>', unsafe_allow_html=True)
+st.markdown("""
+```
+
 <div class="pb-setup-card bo" style="border-left-color:#2dd4bf">
   <div class="pb-setup-title">Before You Trade Anything</div>
   <div class="pb-setup-tagline">Market conditions first. A mediocre setup in a good market beats a great setup in a bad market.</div>
@@ -2246,9 +2381,12 @@ with tab_guide:
 </div>
 """, unsafe_allow_html=True)
 
-    # ── Setup 1: Parabolic Short ───────────────────────────────────────────────
-    st.markdown('<div class="pb-section-hdr">Setup 1 · Parabolic Short (& Long) · already running in Tab 1</div>', unsafe_allow_html=True)
-    st.markdown("""
+```
+# ── Setup 1: Parabolic Short ───────────────────────────────────────────────
+st.markdown('<div class="pb-section-hdr">Setup 1 · Parabolic Short (& Long) · already running in Tab 1</div>', unsafe_allow_html=True)
+st.markdown("""
+```
+
 <div class="pb-setup-card ps">
   <div class="pb-setup-title">📉 Parabolic Short</div>
   <div class="pb-setup-tagline">Stock goes up too far too fast. Physics takes over. You short the euphoria peak.</div>
@@ -2289,9 +2427,12 @@ with tab_guide:
 </div>
 """, unsafe_allow_html=True)
 
-    # ── Setup 2: Episodic Pivot ────────────────────────────────────────────────
-    st.markdown('<div class="pb-section-hdr">Setup 2 · Episodic Pivot · running in Tab 2</div>', unsafe_allow_html=True)
-    st.markdown("""
+```
+# ── Setup 2: Episodic Pivot ────────────────────────────────────────────────
+st.markdown('<div class="pb-section-hdr">Setup 2 · Episodic Pivot · running in Tab 2</div>', unsafe_allow_html=True)
+st.markdown("""
+```
+
 <div class="pb-setup-card ep">
   <div class="pb-setup-title">⚡ Episodic Pivot (EP)</div>
   <div class="pb-setup-tagline">Unexpected news forces institutions to revalue a stock overnight. They can't buy it all in one day — that's your multi-week edge.</div>
@@ -2344,9 +2485,12 @@ with tab_guide:
 </div>
 """, unsafe_allow_html=True)
 
-    # ── Setup 3: Momentum Breakout ─────────────────────────────────────────────
-    st.markdown('<div class="pb-section-hdr">Setup 3 · Momentum Breakout · running in Tab 3</div>', unsafe_allow_html=True)
-    st.markdown("""
+```
+# ── Setup 3: Momentum Breakout ─────────────────────────────────────────────
+st.markdown('<div class="pb-section-hdr">Setup 3 · Momentum Breakout · running in Tab 3</div>', unsafe_allow_html=True)
+st.markdown("""
+```
+
 <div class="pb-setup-card bo">
   <div class="pb-setup-title">🚀 Momentum Breakout (High Tight Flag)</div>
   <div class="pb-setup-tagline">Stocks move in staircase steps. You buy the beginning of the next step, just as it forms.</div>
@@ -2399,9 +2543,12 @@ with tab_guide:
 </div>
 """, unsafe_allow_html=True)
 
-    # ── Risk Management Table ──────────────────────────────────────────────────
-    st.markdown('<div class="pb-section-hdr">Risk Management — the same rules across all setups</div>', unsafe_allow_html=True)
-    st.markdown("""
+```
+# ── Risk Management Table ──────────────────────────────────────────────────
+st.markdown('<div class="pb-section-hdr">Risk Management — the same rules across all setups</div>', unsafe_allow_html=True)
+st.markdown("""
+```
+
 <table class="pb-risk-table">
   <tr><th>Parameter</th><th>Rule</th><th>Why</th></tr>
   <tr><td>Position size</td><td>10–20% of account</td><td>Big enough to matter, small enough to survive</td></tr>
@@ -2415,9 +2562,12 @@ with tab_guide:
 </table>
 """, unsafe_allow_html=True)
 
-    # ── ATR Formula ───────────────────────────────────────────────────────────
-    st.markdown('<div class="pb-section-hdr" style="margin-top:1.5rem">The ATR Extension Formula — how the Parabolic Short scanner works</div>', unsafe_allow_html=True)
-    st.markdown("""
+```
+# ── ATR Formula ───────────────────────────────────────────────────────────
+st.markdown('<div class="pb-section-hdr" style="margin-top:1.5rem">The ATR Extension Formula — how the Parabolic Short scanner works</div>', unsafe_allow_html=True)
+st.markdown("""
+```
+
 <div class="pb-formula-box">
   <span style="color:#3d4f6b">// Adapted from jfsrev / fred6724 on TradingView</span><br>
   <span style="color:#818cf8">A</span> = ATR(14) ÷ Price &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color:#3d4f6b">← volatility normalised to % of price</span><br>
@@ -2431,9 +2581,12 @@ with tab_guide:
 </div>
 """, unsafe_allow_html=True)
 
-    # ── Study Guide ───────────────────────────────────────────────────────────
-    st.markdown('<div class="pb-section-hdr" style="margin-top:1.5rem">How to Master a Setup — Kristjan\'s Method</div>', unsafe_allow_html=True)
-    st.markdown("""
+```
+# ── Study Guide ───────────────────────────────────────────────────────────
+st.markdown('<div class="pb-section-hdr" style="margin-top:1.5rem">How to Master a Setup — Kristjan\'s Method</div>', unsafe_allow_html=True)
+st.markdown("""
+```
+
 <div class="pb-setup-card bo" style="border-left-color:#818cf8">
   <div class="pb-setup-title">The Deep Dive Process</div>
   <div class="pb-setup-tagline">Kristjan built an Evernote database of thousands of historical examples before he ever traded a setup live.</div>
