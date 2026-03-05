@@ -775,13 +775,13 @@ def phase1_ep(min_gap_pct: float, min_vol: int, min_price: float,
             Query()
             .set_markets("america")
             .select("name", "close", "gap", "relative_volume_10d_calc",
-                    "volume", "change", "Perf.3M", "Perf.6M", "type", "exchange",
+                    "volume", "change", "Perf.1M", "Perf.3M", "Perf.6M", "type", "exchange",
                     "market_cap_basic", "SMA50", "ATR")
             .where(
                 Column("close") > min_price,
                 Column("volume") > min_vol,
                 Column("gap") >= min_gap_pct,
-                Column("relative_volume_10d_calc") >= 2.0,
+                Column("relative_volume_10d_calc") >= 3.0,   # raised from 2× — Kristjan: vol must be unmistakable
             )
             .order_by("relative_volume_10d_calc", ascending=False)
             .limit(500)
@@ -814,17 +814,18 @@ def phase1_ep(min_gap_pct: float, min_vol: int, min_price: float,
     if df is None or df.empty:
         return [], None
 
-    for col in ["gap", "relative_volume_10d_calc", "change", "Perf.3M", "Perf.6M", "SMA50", "ATR"]:
+    for col in ["gap", "relative_volume_10d_calc", "change", "Perf.1M", "Perf.3M", "Perf.6M", "SMA50", "ATR"]:
         if col not in df.columns: df[col] = 0.0
     df = df.fillna(0.0)
     df["is_etf"] = df["type"].isin(["fund", "etf", "dr"])
 
     return (
         df[["name", "close", "gap", "relative_volume_10d_calc", "change",
-            "Perf.3M", "Perf.6M", "exchange", "is_etf", "SMA50", "ATR"]]
+            "Perf.1M", "Perf.3M", "Perf.6M", "exchange", "is_etf", "SMA50", "ATR"]]
         .rename(columns={"name": "ticker", "close": "tv_close",
                          "relative_volume_10d_calc": "rel_vol",
-                         "change": "day_chg", "Perf.3M": "gain_3m",
+                         "change": "day_chg", "Perf.1M": "gain_1m",
+                         "Perf.3M": "gain_3m",
                          "Perf.6M": "gain_6m", "SMA50": "tv_sma50", "ATR": "tv_atr"})
         .to_dict("records"),
         None,
@@ -832,7 +833,7 @@ def phase1_ep(min_gap_pct: float, min_vol: int, min_price: float,
 
 
 def phase2_ep_confirm(candidate: dict, min_vol: int, min_price: float = 0.0) -> dict | None:
-    """Phase 2 EP -- enrich with yfinance: avg vol, streak, prior consolidation check."""
+    """Phase 2 EP -- enrich with yfinance: avg vol, streak, dollar vol, float, neglect check."""
     ticker   = candidate["ticker"]
     tv_close = float(candidate.get("tv_close") or 0)
     gap_pct  = float(candidate.get("gap") or 0)
@@ -841,19 +842,21 @@ def phase2_ep_confirm(candidate: dict, min_vol: int, min_price: float = 0.0) -> 
     if tv_close <= 0 or tv_close < min_price:
         return None
 
-    # Was stock in consolidation before the EP? (low 3M gain before today = good EP)
+    # Prior performance — neglect uses both 3M and 6M
+    gain_1m = float(candidate.get("gain_1m") or 0)
     gain_3m = float(candidate.get("gain_3m") or 0)
+    gain_6m = float(candidate.get("gain_6m") or 0)
 
-    avg_vol  = None
-    consec   = 0
-    day_chg  = float(candidate.get("day_chg") or 0)
+    avg_vol    = None
+    consec     = 0
+    day_chg    = float(candidate.get("day_chg") or 0)
+    float_sh   = None   # shares float from yfinance info
+    short_pct  = None   # short % of float
 
     try:
-        df = yf.download(ticker, period="3mo", interval="1d",
-                         progress=False, auto_adjust=False)
+        tk = yf.Ticker(ticker)
+        df = tk.history(period="3mo", interval="1d", auto_adjust=False)
         if not df.empty:
-            if isinstance(df.columns, pd.MultiIndex):
-                df.columns = df.columns.get_level_values(0)
             close_col = "Close" if "Close" in df.columns else "Adj Close"
             if close_col in df.columns and "Volume" in df.columns:
                 closes  = df[close_col].squeeze().dropna()
@@ -866,9 +869,35 @@ def phase2_ep_confirm(candidate: dict, min_vol: int, min_price: float = 0.0) -> 
                             consec += 1
                         else:
                             break
+        # Float and short interest -- best-effort, may fail
+        try:
+            info      = tk.info
+            float_sh  = info.get("floatShares") or info.get("sharesOutstanding")
+            short_pct = info.get("shortPercentOfFloat")  # decimal (e.g. 0.08 = 8%)
+        except Exception:
+            pass
     except Exception:
         pass
 
+    # Dollar volume (liquidity gate)
+    dollar_vol   = (avg_vol or 0) * tv_close         # raw dollars traded
+    dv_m         = dollar_vol / 1_000_000            # in millions
+    liq_warn     = dollar_vol < 3_000_000            # <$3M = below Kristjan's documented floor
+    dv_disp      = f"${dv_m:.1f}M" if avg_vol else "N/A"
+
+    # Float classification
+    low_float = False
+    float_disp = "N/A"
+    if float_sh and float_sh > 0:
+        float_m   = float_sh / 1_000_000
+        low_float = float_m < 20          # <20M shares = low float EP bonus
+        float_disp = f"{float_m:.1f}M sh"
+
+    # Short interest
+    high_short = (short_pct or 0) > 0.15    # >15% short = fuel for squeeze
+    short_disp = f"{(short_pct or 0)*100:.1f}%" if short_pct else "N/A"
+
+    # Avg vol display
     if avg_vol is not None and avg_vol >= 1_000_000:
         avg_vol_disp = f"{avg_vol/1_000_000:.1f}M"
     elif avg_vol is not None and avg_vol >= 1_000:
@@ -876,25 +905,41 @@ def phase2_ep_confirm(candidate: dict, min_vol: int, min_price: float = 0.0) -> 
     else:
         avg_vol_disp = "N/A"
 
-    # Quality score: higher gap + higher rel_vol + low prior gain (neglected stock) = better EP
-    neglect_bonus = 1.0 if gain_3m < 20 else 0.0  # stock was sideways → true EP
-    ep_score = round(gap_pct * 0.5 + rel_vol * 2 + neglect_bonus * 10, 1)
+    # ── Neglect: stock was basing before the EP (more explosive move expected)
+    # True neglect = stock flat/down for 6 months, then an explosive catalyst
+    neglected = gain_6m < 30 and gain_3m < 25   # tighter than before: both timeframes quiet
+
+    # ── EP quality score  (0-100 range)
+    # Volume is the single most important signal — Kristjan: "vol must be unmistakable"
+    vol_score     = min(rel_vol * 3, 40)          # 3× vol = 9 pts, 10× = 30, 13× = 40 (cap)
+    gap_score     = min(gap_pct * 1.2, 20)        # 8% gap = 9.6, 15% = 18, 17%+ = 20 (cap)
+    neglect_score = 15 if neglected else 0         # sideways stock = massive bonus
+    float_score   = 8  if low_float  else 0        # low float = amplified move
+    short_score   = 7  if high_short else 0        # high short interest = squeeze fuel
+    ep_score      = round(vol_score + gap_score + neglect_score + float_score + short_score, 1)
 
     return {
-        "ticker":     ticker,
-        "price":      round(tv_close, 2),
-        "gap_pct":    round(gap_pct, 1),
-        "rel_vol":    round(rel_vol, 2),
-        "day_chg":    round(float(day_chg), 2),
-        "gain_3m":    round(gain_3m, 1),
-        "gain_6m":    round(float(candidate.get("gain_6m") or 0), 1),
-        "avg_vol":    avg_vol_disp,
+        "ticker":      ticker,
+        "price":       round(tv_close, 2),
+        "gap_pct":     round(gap_pct, 1),
+        "rel_vol":     round(rel_vol, 2),
+        "day_chg":     round(float(day_chg), 2),
+        "gain_1m":     round(gain_1m, 1),
+        "gain_3m":     round(gain_3m, 1),
+        "gain_6m":     round(gain_6m, 1),
+        "avg_vol":     avg_vol_disp,
+        "dv_disp":     dv_disp,
+        "liq_warn":    liq_warn,
+        "float_disp":  float_disp,
+        "low_float":   low_float,
+        "short_disp":  short_disp,
+        "high_short":  high_short,
         "consec_days": consec,
-        "is_day1":    consec <= 1,
-        "ep_score":   ep_score,
-        "neglected":  gain_3m < 20,   # True = stock was basing → ideal EP
-        "is_etf":     candidate["is_etf"],
-        "exchange":   candidate["exchange"],
+        "is_day1":     consec <= 1,
+        "ep_score":    ep_score,
+        "neglected":   neglected,
+        "is_etf":      candidate["is_etf"],
+        "exchange":    candidate["exchange"],
     }
 
 
@@ -1025,6 +1070,8 @@ def phase2_breakout_confirm(candidate: dict, min_vol: int, min_price: float = 0.
     range_tightness = None
     consec   = 0
     day_chg  = float(candidate.get("day_chg") or 0)
+    prior_ep = False          # had a big gap-up (>8%) in past 60 days?
+    prior_ep_days_ago = None
 
     try:
         df = yf.download(ticker, period="3mo", interval="1d",
@@ -1052,6 +1099,22 @@ def phase2_breakout_confirm(candidate: dict, min_vol: int, min_price: float = 0.
                             consec += 1
                         else:
                             break
+                # Prior EP detection: look for a gap-up day >8% in the past 60 days
+                # A stock that had an EP then consolidated = higher-probability breakout
+                if len(closes) >= 5:
+                    # look at all but last 2 days (need some consolidation after the EP)
+                    lookback = min(62, len(closes) - 2)
+                    for idx in range(len(closes) - 2, len(closes) - 2 - lookback, -1):
+                        if idx <= 0:
+                            break
+                        prev_c = float(closes.iloc[idx - 1])
+                        curr_c = float(closes.iloc[idx])
+                        if prev_c > 0:
+                            day_gap = (curr_c - prev_c) / prev_c * 100
+                            if day_gap >= 8.0:
+                                prior_ep = True
+                                prior_ep_days_ago = len(closes) - 1 - idx
+                                break
     except Exception:
         pass
 
@@ -1062,11 +1125,19 @@ def phase2_breakout_confirm(candidate: dict, min_vol: int, min_price: float = 0.
     else:
         avg_vol_disp = "N/A"
 
+    # Dollar volume
+    dollar_vol = (avg_vol or 0) * tv_close
+    dv_m       = dollar_vol / 1_000_000
+    dv_disp    = f"${dv_m:.1f}M" if avg_vol else "N/A"
+    liq_warn   = dollar_vol < 3_000_000
+
     # Setup quality: tight range + near MA + strong prior move = higher score
     tightness_score = max(0, 10 - (range_tightness or 10))
     proximity_score = max(0, 10 - ma_prox)
     momentum_score  = min(float(candidate.get("gain_3m") or 0) / 10, 10)
-    setup_score     = round(tightness_score * 0.4 + proximity_score * 0.4 + momentum_score * 0.2, 1)
+    prior_ep_bonus  = 2.0 if prior_ep else 0.0   # prior EP = higher conviction
+    nasdaq_bonus    = 0.5 if candidate.get("exchange") == "NASDAQ" else 0.0
+    setup_score     = round(tightness_score * 0.4 + proximity_score * 0.4 + momentum_score * 0.2 + prior_ep_bonus + nasdaq_bonus, 1)
 
     return {
         "ticker":           ticker,
@@ -1085,7 +1156,11 @@ def phase2_breakout_confirm(candidate: dict, min_vol: int, min_price: float = 0.
         "range_tightness":  range_tightness,
         "rel_vol":          round(float(candidate.get("rel_vol") or 0), 2),
         "avg_vol":          avg_vol_disp,
+        "dv_disp":          dv_disp,
+        "liq_warn":         liq_warn,
         "consec_days":      consec,
+        "prior_ep":         prior_ep,
+        "prior_ep_days_ago": prior_ep_days_ago,
         "setup_score":      setup_score,
         "is_etf":           candidate["is_etf"],
         "exchange":         candidate["exchange"],
@@ -1368,7 +1443,7 @@ with st.sidebar:
     if "ps_sma_period" not in st.session_state: st.session_state["ps_sma_period"] = 50
     if "ps_atr_period" not in st.session_state: st.session_state["ps_atr_period"] = 14
     if "pl_drop" not in st.session_state:       st.session_state["pl_drop"] = 30.0
-    if "ep_gap" not in st.session_state:        st.session_state["ep_gap"] = 10.0
+    if "ep_gap" not in st.session_state:        st.session_state["ep_gap"] = 8.0
     if "bo_perf" not in st.session_state:       st.session_state["bo_perf"] = 25.0
 
 
@@ -1668,8 +1743,18 @@ Also elevated: {others_txt}
 with tab_ep:
     _status_row("Episodic Pivot", "yfinance enrich")
 
+    st.markdown("""
+<div style="background:rgba(99,102,241,0.08);border:1px solid rgba(99,102,241,0.25);border-radius:6px;
+padding:0.6rem 1rem;margin-bottom:0.9rem;font-family:'Geist Mono',monospace;font-size:0.65rem;color:#94a3b8">
+  <b style="color:#818cf8">⚡ HOW TO USE THIS SCANNER</b> &nbsp;·&nbsp;
+  This surfaces <b>recent EP candidates</b> — stocks that gapped on huge volume with a catalyst.
+  The actual entry window is <b>3-10 minutes after the open</b> on the Opening Range High (ORH).
+  Run pre-market · sort by EP Score · focus on NEGLECTED + LOW FLOAT + HIGH SHORT tags for the most explosive moves.
+</div>""", unsafe_allow_html=True)
+
     ep_c1, ep_c2, _ = st.columns([1, 1, 5])
-    min_gap_ep = ep_c1.number_input("Min Gap %", value=10.0, step=1.0, min_value=3.0, key="ep_gap")
+    min_gap_ep = ep_c1.number_input("Min Gap %", value=8.0, step=1.0, min_value=3.0, key="ep_gap",
+                                     help="Kristjan: 'usually at least 8-10%, sometimes a lot more'")
     ep_btn_col, ep_dl_col, _ = st.columns([1, 1, 7])
     run_ep = ep_btn_col.button("▶  RUN SCAN", key="run_ep")
 
@@ -1691,9 +1776,12 @@ with tab_ep:
         n_hits   = len(results)
         p1_count = st.session_state.get("results_ep_p1n", "--")
 
-        top_gap   = f"{results[0]['gap_pct']}%" if results else "--"
-        top_rvol  = f"{results[0]['rel_vol']}×" if results else "--"
-        neglected = sum(1 for r in results if r.get("neglected"))
+        top_gap    = f"{results[0]['gap_pct']}%" if results else "--"
+        top_rvol   = f"{results[0]['rel_vol']}×" if results else "--"
+        neglected  = sum(1 for r in results if r.get("neglected"))
+        low_floats = sum(1 for r in results if r.get("low_float"))
+        high_shorts= sum(1 for r in results if r.get("high_short"))
+        boost_count = sum(1 for r in results if r.get("neglected") or r.get("low_float") or r.get("high_short"))
 
         st.markdown(f"""
 <div class="metric-row">
@@ -1706,9 +1794,9 @@ with tab_ep:
   <div class="metric-box"><div class="metric-label">Peak Rel Vol</div>
     <div class="metric-value">{top_rvol}</div>
     <div class="metric-sub">vs 10-day avg</div></div>
-  <div class="metric-box"><div class="metric-label">Neglected Stocks</div>
-    <div class="metric-value">{neglected}</div>
-    <div class="metric-sub">was sideways → ideal EP</div></div>
+  <div class="metric-box"><div class="metric-label">Boost Factors</div>
+    <div class="metric-value">{boost_count}</div>
+    <div class="metric-sub">neglected: {neglected} · low float: {low_floats} · hi short: {high_shorts}</div></div>
 </div>""", unsafe_allow_html=True)
 
         if results:
@@ -1721,7 +1809,8 @@ with tab_ep:
 <div class="empty-state">
   <div class="empty-icon">⚡</div>
   <div class="empty-text">No Episodic Pivots found today</div>
-  <div class="empty-hint">Best results during earnings season · try lowering Min Gap %</div>
+  <div class="empty-hint">Best results during earnings season · try lowering Min Gap %<br>
+  Note: this scanner surfaces <b>recent EP candidates</b> — the actual entry window is 3-10 min after the open</div>
 </div>""", unsafe_allow_html=True)
         else:
             if "chart_ticker_ep" not in st.session_state:
@@ -1741,9 +1830,15 @@ with tab_ep:
                     type_lbl  = "ETF" if r["is_etf"] else "STOCK"
                     type_cls  = "tag-etf" if r["is_etf"] else "tag-stock"
                     ep_score  = r["ep_score"]
-                    score_col = "#34d399" if ep_score >= 20 else "#f59e0b" if ep_score >= 10 else "#607080"
-                    neglect_b = '<span class="tag tag-streak">🏆 NEGLECTED</span>' if r.get("neglected") else ""
+                    score_col = "#34d399" if ep_score >= 35 else "#f59e0b" if ep_score >= 20 else "#607080"
+                    neglect_b = '<span class="tag tag-streak">NEGLECTED</span>' if r.get("neglected") else ""
+                    float_b   = '<span class="tag tag-day1">LOW FLOAT</span>'  if r.get("low_float")  else ""
+                    short_b   = '<span class="tag tag-rvol">HIGH SHORT</span>' if r.get("high_short") else ""
+                    liq_b     = '<span class="tag" style="background:rgba(248,113,113,.12);color:#f87171;border:1px solid rgba(248,113,113,.3)">⚠ &lt;$3M DV</span>' if r.get("liq_warn") else ""
                     btn_key   = f"ep_chart_{r['ticker']}_{i}"
+                    dv_disp   = r.get("dv_disp", "N/A")
+                    float_disp = r.get("float_disp", "N/A")
+                    gain_1m   = r.get("gain_1m", 0)
                     col.markdown(f"""
 <div class="card">
   <span class="atr-badge atr-norm" style="background:rgba(99,102,241,0.15);color:#818cf8;border-color:#4f46e5">EP</span>
@@ -1754,17 +1849,19 @@ with tab_ep:
     <div><span class="stat-k">Gap</span><span class="stat-v pos">+{gap_val}%</span></div>
     <div><span class="stat-k">Day Chg</span><span class="stat-v {chg_cls}">{chg_sign}{day_chg}%</span></div>
     <div><span class="stat-k">Rel Vol</span><span class="stat-v warn">{rvol_val}×</span></div>
-    <div><span class="stat-k">3M Prior</span><span class="stat-v">{r['gain_3m']}%</span></div>
+    <div><span class="stat-k">1M Prior</span><span class="stat-v">{gain_1m}%</span></div>
+    <div><span class="stat-k">Dollar Vol</span><span class="stat-v">{dv_disp}</span></div>
+    <div><span class="stat-k">Float</span><span class="stat-v">{float_disp}</span></div>
   </div>
   <div class="signal-row">
     <div class="sig-cell"><span class="sig-label">EP Score</span><span class="sig-val" style="color:{score_col}">{ep_score}</span></div>
-    <div class="sig-cell"><span class="sig-label">6M Perf</span><span class="stat-v pos">{r['gain_6m']}%</span></div>
+    <div class="sig-cell"><span class="sig-label">6M Perf</span><span class="stat-v">{r['gain_6m']}%</span></div>
     <div class="sig-cell"><span class="sig-label">Streak</span><span class="sig-val">{r['consec_days']}d ↑</span></div>
   </div>
   <div class="card-tags">
     <span class="tag {type_cls}">{type_lbl}</span>
     <span class="tag tag-exch">{r['exchange']}</span>
-    {neglect_b}
+    {neglect_b}{float_b}{short_b}{liq_b}
   </div>
 </div>""", unsafe_allow_html=True)
                     if col.button(f"📈  {r['ticker']}", key=btn_key, use_container_width=True):
@@ -1776,9 +1873,13 @@ with tab_ep:
                 disp = pd.DataFrame(results).rename(columns={
                     "ticker": "Ticker", "exchange": "Exchange", "is_etf": "ETF",
                     "price": "Price", "gap_pct": "Gap %", "rel_vol": "Rel Vol",
-                    "day_chg": "Day Chg %", "gain_3m": "3M Prior %",
+                    "day_chg": "Day Chg %", "gain_1m": "1M Prior %",
+                    "gain_3m": "3M Prior %",
                     "gain_6m": "6M %", "ep_score": "EP Score",
-                    "neglected": "Was Neglected", "consec_days": "Streak",
+                    "neglected": "Neglected", "low_float": "Low Float",
+                    "high_short": "High Short", "dv_disp": "Dollar Vol",
+                    "float_disp": "Float", "short_disp": "Short %",
+                    "liq_warn": "Liq Warn", "consec_days": "Streak",
                 })
                 st.dataframe(disp, use_container_width=True, hide_index=True)
     else:
@@ -1786,7 +1887,9 @@ with tab_ep:
 <div class="empty-state" style="margin-top:3rem">
   <div class="empty-icon">⚡</div>
   <div class="empty-text">Episodic Pivot Scanner</div>
-  <div class="empty-hint">Finds stocks gapping 10%+ on massive volume · best run during earnings season</div>
+  <div class="empty-hint">Finds stocks gapping 8%+ on 3× or more average volume with a catalyst<br>
+  Score = vol (max 40) + gap (max 20) + neglect +15 + low float +8 + high short +7<br>
+  Entry window: first 3-10 minutes after open on the ORH · best run pre-market</div>
 </div>""", unsafe_allow_html=True)
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1871,6 +1974,12 @@ with tab_bo:
                     tight_cls = "pos" if tight_val < 3 else "warn" if tight_val < 6 else "neg"
                     dist20    = r.get("dist_20") or 0
                     dist_cls  = "pos" if abs(dist20) < 3 else "warn" if abs(dist20) < 8 else "neg"
+                    prior_ep  = r.get("prior_ep", False)
+                    ep_days   = r.get("prior_ep_days_ago")
+                    ep_badge  = f'<span class="tag tag-rvol">⚡ EP {ep_days}d ago</span>' if prior_ep and ep_days else ('<span class="tag tag-rvol">⚡ PRIOR EP</span>' if prior_ep else "")
+                    liq_b     = '<span class="tag" style="background:rgba(248,113,113,.12);color:#f87171;border:1px solid rgba(248,113,113,.3)">⚠ &lt;$3M DV</span>' if r.get("liq_warn") else ""
+                    dv_disp   = r.get("dv_disp", "N/A")
+                    gain_6m   = r.get("gain_6m", 0)
                     btn_key   = f"bo_chart_{r['ticker']}_{i}"
                     col.markdown(f"""
 <div class="card">
@@ -1881,8 +1990,10 @@ with tab_bo:
   <div class="card-stats">
     <div><span class="stat-k">1M Gain</span><span class="stat-v pos">+{r['gain_1m']}%</span></div>
     <div><span class="stat-k">3M Gain</span><span class="stat-v pos">+{r['gain_3m']}%</span></div>
-    <div><span class="stat-k">Day Chg</span><span class="stat-v {chg_cls}">{chg_sign}{day_chg}%</span></div>
+    <div><span class="stat-k">6M Gain</span><span class="stat-v pos">+{gain_6m}%</span></div>
     <div><span class="stat-k">vs SMA20</span><span class="stat-v {dist_cls}">{dist20:+.1f}%</span></div>
+    <div><span class="stat-k">Day Chg</span><span class="stat-v {chg_cls}">{chg_sign}{day_chg}%</span></div>
+    <div><span class="stat-k">Dollar Vol</span><span class="stat-v">{dv_disp}</span></div>
   </div>
   <div class="signal-row">
     <div class="sig-cell"><span class="sig-label">Tightness</span><span class="sig-val {tight_cls}">{tight_val}%</span></div>
@@ -1892,6 +2003,7 @@ with tab_bo:
   <div class="card-tags">
     <span class="tag {type_cls}">{type_lbl}</span>
     <span class="tag tag-exch">{r['exchange']}</span>
+    {ep_badge}{liq_b}
   </div>
 </div>""", unsafe_allow_html=True)
                     if col.button(f"📈  {r['ticker']}", key=btn_key, use_container_width=True):
@@ -1907,6 +2019,8 @@ with tab_bo:
                     "dist_10": "vs SMA10 %", "dist_20": "vs SMA20 %",
                     "dist_50": "vs SMA50 %", "range_tightness": "Range Tight %",
                     "rel_vol": "Rel Vol", "setup_score": "Setup Score",
+                    "prior_ep": "Prior EP", "prior_ep_days_ago": "EP Days Ago",
+                    "dv_disp": "Dollar Vol", "liq_warn": "Liq Warn",
                 })
                 st.dataframe(disp, use_container_width=True, hide_index=True)
     else:
@@ -1914,7 +2028,9 @@ with tab_bo:
 <div class="empty-state" style="margin-top:3rem">
   <div class="empty-icon">🚀</div>
   <div class="empty-text">Momentum Breakout Scanner</div>
-  <div class="empty-hint">Finds stocks in tight consolidation after big moves · surfing 10/20 MA · ready to break</div>
+  <div class="empty-hint">Finds stocks consolidating tightly after big runs · surfing 10/20 MA · ready to break<br>
+  Score bonuses: +2 for prior EP (strongest catalyst), +0.5 for NASDAQ listing<br>
+  Strongest setups: 1M &gt;25% · 3M &gt;50% · 6M &gt;100% with tight base near MAs</div>
 </div>""", unsafe_allow_html=True)
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -2305,23 +2421,27 @@ with tab_guide:
   <div class="pb-rule-grid">
     <div class="pb-rule">
       <span class="pb-rule-icon scan">SCAN</span>
-      <div class="pb-rule-text"><b>Gap 10%+</b> at open. That's the minimum. Less than 10% = not an EP, even on great earnings.</div>
+      <div class="pb-rule-text"><b>Gap 8%+ at open on 3× or more average volume.</b> Rel vol is the single most important signal — "volume must be unmistakable." Less than 3× = skip regardless of gap size.</div>
     </div>
     <div class="pb-rule">
       <span class="pb-rule-icon scan">VOL</span>
-      <div class="pb-rule-text"><b>Volume is #1.</b> Stock should trade its entire average daily volume in the first 15-20 minutes. Ideally already huge in pre-market.</div>
+      <div class="pb-rule-text"><b>Volume is #1.</b> Stock should trade its entire average daily volume in the first 15-20 minutes. Ideally already huge in pre-market. Dollar volume &gt;$3M = minimum liquidity floor.</div>
     </div>
     <div class="pb-rule">
       <span class="pb-rule-icon tip">IDEAL</span>
-      <div class="pb-rule-text"><b>Best EPs:</b> stocks that went sideways 3-6 months before. Neglected stocks with huge catalysts = biggest moves.</div>
+      <div class="pb-rule-text"><b>Best EPs: neglected stock + huge catalyst.</b> Sideways 3-6 months = frustrated holders sold, everyone's out → when surprise hits, massive demand surge. Look for 6M gain &lt;30% before EP day.</div>
+    </div>
+    <div class="pb-rule">
+      <span class="pb-rule-icon tip">BOOST</span>
+      <div class="pb-rule-text"><b>6 explosive-EP amplifiers (Stockbee framework):</b> (1) Sector: health/biotech, tech, cyclicals. (2) Neglect: 3-6M sideways base. (3) Low float &lt;20M shares. (4) High short interest &gt;15%. (5) Low institutional ownership. (6) Analyst price target raises post-earnings. More boxes = bigger move.</div>
     </div>
     <div class="pb-rule">
       <span class="pb-rule-icon scan">FUND</span>
-      <div class="pb-rule-text"><b>Earnings EPs:</b> triple-digit YoY EPS/Sales ideal. Big analyst beat + big guidance raise. Many small caps have no analysts -- that's fine.</div>
+      <div class="pb-rule-text"><b>Earnings EPs:</b> triple-digit YoY EPS/Sales ideal. Big analyst beat + big guidance raise. Many small caps have no analysts -- that's fine. Massive earnings surprise (+300% EPS) &gt; small beat every time.</div>
     </div>
     <div class="pb-rule">
       <span class="pb-rule-icon entry">ENTRY</span>
-      <div class="pb-rule-text"><b>Opening Range Highs (ORH).</b> Wait for the 1-min candle to form, watch volume closely. Buy when it breaks the 1-min high.</div>
+      <div class="pb-rule-text"><b>Opening Range Highs (ORH) · entry window: 3-10 min after open.</b> Watch volume in first minute. Buy when 1-min high is taken out. Most good EPs announce themselves very early — huge volume obvious within 3-5 min.</div>
     </div>
     <div class="pb-rule">
       <span class="pb-rule-icon entry">ADD</span>
@@ -2333,15 +2453,15 @@ with tab_guide:
     </div>
     <div class="pb-rule">
       <span class="pb-rule-icon exit">EXIT</span>
-      <div class="pb-rule-text"><b>Sell 1/3-1/2 after 3-5 days.</b> Move stop to break even. Trail rest with 10-day MA. Exit on first close below 10-day.</div>
+      <div class="pb-rule-text"><b>Sell 1/3-1/2 after 3-5 days.</b> Move stop to break even. Trail rest with 10-day MA. Exit on first close below 10-day. For micro-cap explosions: use hourly 10/20 EMA as trailing stop instead.</div>
     </div>
     <div class="pb-rule">
       <span class="pb-rule-icon avoid">AVOID</span>
-      <div class="pb-rule-text"><b>Second EPs.</b> Stock already made a big move, now gaps again. Failure rate is higher and move smaller.</div>
+      <div class="pb-rule-text"><b>Second EPs.</b> Stock already made a big move, now gaps again. Failure rate is higher, move smaller. Also avoid: NYSE-listed stocks (choppier than NASDAQ), stocks with history of mean reversion.</div>
     </div>
     <div class="pb-rule">
       <span class="pb-rule-icon tip">TYPES</span>
-      <div class="pb-rule-text">Earnings · FDA decisions · Gov regulation · Contracts · Sector EPs (whole sector moves without specific news)</div>
+      <div class="pb-rule-text">Earnings · FDA decisions · Gov regulation · Contracts · Sector EPs (whole sector moves without specific news) · Biotech 2-stage: massive gap day 1, give back, then PEAD breakout weeks later</div>
     </div>
   </div>
 </div>
@@ -2360,19 +2480,23 @@ with tab_guide:
   <div class="pb-rule-grid">
     <div class="pb-rule">
       <span class="pb-rule-icon scan">SCAN</span>
-      <div class="pb-rule-text"><b>Top 1-2% gainers</b> over 1M, 3M, 6M. This identifies the leaders. ADR > 5%. Volume > $20M daily.</div>
+      <div class="pb-rule-text"><b>Top 1-2% gainers</b> over 1M, 3M, 6M. This identifies the leaders. ADR &gt; 5%. Dollar volume &gt;$3M/day (Kristjan's documented floor). Prefer NASDAQ over NYSE — cleaner momentum, less choppiness.</div>
     </div>
     <div class="pb-rule">
       <span class="pb-rule-icon scan">PHASE1</span>
-      <div class="pb-rule-text"><b>Big first leg:</b> 30-100%+ move in past 1-3 months. The more explosive the first leg, the more powerful the next leg.</div>
+      <div class="pb-rule-text"><b>Big first leg:</b> 30-100%+ move in past 1-3 months. The more explosive the first leg, the more powerful the next leg. Prior EP = highest-probability first leg.</div>
     </div>
     <div class="pb-rule">
       <span class="pb-rule-icon scan">PHASE2</span>
       <div class="pb-rule-text"><b>Tight consolidation:</b> Higher lows. Range narrows. "Surfs" the rising 10- and 20-day MA. 2 weeks to 2 months long.</div>
     </div>
     <div class="pb-rule">
+      <span class="pb-rule-icon tip">PRIOR EP</span>
+      <div class="pb-rule-text"><b>Best breakout setups start with an EP.</b> The EP resets the stock's trading range and brings in institutional buyers who can't all buy on day 1. The subsequent tight base is where you load up before the next leg. Look for ⚡ EP badge in scanner results.</div>
+    </div>
+    <div class="pb-rule">
       <span class="pb-rule-icon tip">5-STAR</span>
-      <div class="pb-rule-text"><b>Best setups show relative strength.</b> Market sells off, this stock won't break. That's institutional accumulation.</div>
+      <div class="pb-rule-text"><b>Best setups show relative strength.</b> Market sells off, this stock won't break. That's institutional accumulation. Leaders make higher lows when the index retests lows.</div>
     </div>
     <div class="pb-rule">
       <span class="pb-rule-icon entry">ENTRY</span>
@@ -2392,7 +2516,7 @@ with tab_guide:
     </div>
     <div class="pb-rule">
       <span class="pb-rule-icon avoid">AVOID</span>
-      <div class="pb-rule-text"><b>Random up days.</b> Needs to be coming off a solid tight range. Low ADR stocks. Long candle the day before the breakout.</div>
+      <div class="pb-rule-text"><b>Random up days, NYSE stocks, choppy mean-reverting tickers.</b> Needs to be coming off a solid tight range. Low ADR stocks. Long candle the day before the breakout. Stocks that never had a clean trend.</div>
     </div>
     <div class="pb-rule">
       <span class="pb-rule-icon tip">HTF</span>
@@ -2403,6 +2527,37 @@ with tab_guide:
 <div class="pb-quote">
 "Flag patterns are very powerful -- the more powerful the first leg higher, the more powerful the next leg higher will be most of the time."
 <span>-- Kristjan Kullamägi</span>
+</div>
+""", unsafe_allow_html=True)
+
+    # ── Market Filter ─────────────────────────────────────────────────────────
+    st.markdown('<div class="pb-section-hdr">Market Context -- the wind in your back</div>', unsafe_allow_html=True)
+    st.markdown("""
+<div class="pb-setup-card" style="border-left:3px solid var(--teal)">
+  <div class="pb-setup-title" style="color:var(--teal)">📊 QQQ / IWM Market Filter</div>
+  <div class="pb-setup-tagline">"Good setups in good markets. That's all you need to be focused on." — Kristjan</div>
+  <div class="pb-rule-grid">
+    <div class="pb-rule">
+      <span class="pb-rule-icon scan" style="background:var(--teal);color:#080a0c">GREEN</span>
+      <div class="pb-rule-text"><b>10-day MA &gt; 20-day MA, both rising.</b> This is where the money is made. Go on margin, build positions aggressively. Any trading system works in a good market.</div>
+    </div>
+    <div class="pb-rule">
+      <span class="pb-rule-icon avoid">YELLOW</span>
+      <div class="pb-rule-text"><b>10-day MA crossing 20-day MA or MAs flat.</b> Trade with reduced size. Take fewer trades. Be more selective. This is a "hard penny" environment.</div>
+    </div>
+    <div class="pb-rule">
+      <span class="pb-rule-icon stop">RED</span>
+      <div class="pb-rule-text"><b>Both MAs declining, market in downtrend.</b> Sit in cash. Breakouts don't work. EPs still work but only the strongest with huge volume. Small account traders have more latitude.</div>
+    </div>
+    <div class="pb-rule">
+      <span class="pb-rule-icon tip">IWM</span>
+      <div class="pb-rule-text"><b>Watch small caps (IWM).</b> Small cap participation = healthy bull market with broad speculation. Classic bull markets show small and mid caps leading, not just mega-cap QQQ.</div>
+    </div>
+    <div class="pb-rule">
+      <span class="pb-rule-icon tip">TIMING</span>
+      <div class="pb-rule-text"><b>2-3 swing cycles per year, each 2-3 months long.</b> These align with earnings seasons. The rest of the year: sit in cash, do very little. Trade these concentrated windows aggressively.</div>
+    </div>
+  </div>
 </div>
 """, unsafe_allow_html=True)
 
@@ -2452,6 +2607,8 @@ with tab_guide:
     <li>Do this for 500-1,000 examples. You will start to see the patterns that actually work.</li>
     <li>Study what the chart looked like the day BEFORE the move. That's your entry signal.</li>
     <li>Study failures too. Know what a bad version of the setup looks like.</li>
+    <li>For EPs specifically: study how the stock looked in the <b>6 months before</b> the EP day — was it flat? Declining? How many failed breakouts? That's what neglect looks like.</li>
+    <li>For EPs: run the scan for "stocks up 50%+ in 14 days over past 6 months" retrospectively to find historical examples and pattern-match them.</li>
     <li>Only after hundreds of examples are you ready to trade it with real size.</li>
   </ul>
 </div>
@@ -2460,4 +2617,3 @@ with tab_guide:
 <span>-- Kristjan Kullamägi</span>
 </div>
 """, unsafe_allow_html=True)
-
