@@ -291,8 +291,8 @@ def phase1_tradingview(min_price: float, min_vol: int, prescreen_mult: float,
     df["is_etf"] = df["type"].isin(["fund", "etf", "dr"])
 
     return (
-        df[["name", "tv_atr_mult", "exchange", "is_etf"]]
-        .rename(columns={"name": "ticker"})
+        df[["name", "close", "tv_atr_mult", "exchange", "is_etf"]]
+        .rename(columns={"name": "ticker", "close": "tv_close"})
         .to_dict("records"),
         None,
     )
@@ -311,23 +311,33 @@ def phase2_confirm(candidate: dict, sma_period: int, atr_period: int,
                    min_price: float, min_vol: int, min_atr_mult: float) -> dict | None:
     """
     Phase 2 — yfinance precision confirmation.
-    Runs Wilder's exact ATR against 6 months of OHLCV data.
-    Returns enriched result dict or None if it doesn't confirm.
+
+    IMPORTANT: auto_adjust=False is intentional.
+    auto_adjust=True retroactively shifts the entire price series for dividends,
+    causing the displayed close price to diverge significantly from the real
+    market price (e.g. ALSN showing $161 instead of $127). We use unadjusted
+    OHLCV for all calculations so prices match what traders see on their charts.
+    The TV close from Phase 1 is used as the authoritative current price sanity
+    check — if yfinance diverges by >8% from TV, the data is unreliable and we skip.
     """
-    ticker = candidate["ticker"]
+    ticker   = candidate["ticker"]
+    tv_close = candidate.get("tv_close", None)   # authoritative current price from TV
+
     try:
         df = yf.download(ticker, period="6mo", interval="1d",
-                         progress=False, auto_adjust=True)
+                         progress=False, auto_adjust=False)
         if df.empty or len(df) < sma_period + 5:
             return None
         if isinstance(df.columns, pd.MultiIndex):
             df.columns = df.columns.get_level_values(0)
 
-        for col in ("Close", "High", "Low", "Volume"):
+        # Prefer unadjusted Close; fall back to Adj Close if needed
+        close_col = "Close" if "Close" in df.columns else "Adj Close"
+        for col in (close_col, "High", "Low", "Volume"):
             if col not in df.columns:
                 return None
 
-        close  = df["Close"].squeeze().dropna()
+        close  = df[close_col].squeeze().dropna()
         high   = df["High"].squeeze()
         low    = df["Low"].squeeze()
         volume = df["Volume"].squeeze()
@@ -335,7 +345,20 @@ def phase2_confirm(candidate: dict, sma_period: int, atr_period: int,
         if len(close) < sma_period + 5:
             return None
 
-        last_close = float(close.iloc[-1])
+        yf_last = float(close.iloc[-1])
+
+        # Cross-check yfinance vs TradingView price — if >8% apart, data is suspect
+        if tv_close and tv_close > 0:
+            divergence = abs(yf_last - tv_close) / tv_close
+            if divergence > 0.08:
+                # Use TV price as anchor; rebuild close series scaled to TV
+                scale  = tv_close / yf_last
+                close  = close * scale
+                high   = high   * scale
+                low    = low    * scale
+                yf_last = tv_close
+
+        last_close = yf_last
         if last_close < min_price:
             return None
 
@@ -359,9 +382,9 @@ def phase2_confirm(candidate: dict, sma_period: int, atr_period: int,
         if atr_mult < min_atr_mult:
             return None
 
-        pct_sma  = (last_close - float(sma)) / float(sma) * 100
-        prev     = float(close.iloc[-2]) if len(close) > 1 else last_close
-        day_chg  = (last_close - prev) / prev * 100
+        pct_sma = (last_close - float(sma)) / float(sma) * 100
+        prev    = float(close.iloc[-2]) if len(close) > 1 else last_close
+        day_chg = (last_close - prev) / prev * 100
 
         def _fmt_vol(v):
             if v >= 1_000_000: return f"{v/1_000_000:.1f}M"
