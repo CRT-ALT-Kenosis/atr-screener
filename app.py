@@ -1,4 +1,5 @@
 import streamlit as st
+import streamlit.components.v1 as st_components
 import yfinance as yf
 import pandas as pd
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -185,6 +186,30 @@ html, body, [class*="css"], .stApp {
 .sig-val.neg { color:var(--red); }
 .sig-val.warn{ color:var(--amber); }
 
+.chart-container {
+  background: var(--bg1);
+  border: 1px solid var(--line2);
+  border-radius: var(--r);
+  padding: 0;
+  margin-bottom: 1.4rem;
+  overflow: hidden;
+}
+.chart-header {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 0.65rem 1rem;
+  border-bottom: 1px solid var(--line);
+  background: var(--bg2);
+}
+.chart-ticker-label {
+  font-family: 'Geist Mono', monospace;
+  font-size: 1rem; font-weight: 700; color: var(--bright);
+  letter-spacing: 0.04em;
+}
+.chart-meta {
+  font-family: 'Geist Mono', monospace;
+  font-size: 0.65rem; color: var(--muted);
+}
+
 .sector-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
@@ -301,6 +326,71 @@ TV_EXCHANGE_MAP = {
     "BATS":          "BATS",
     "IEX":           None,     # not in TV screener
 }
+
+
+# Exchange → TradingView symbol prefix
+TV_PREFIX = {
+    "NASDAQ":        "NASDAQ",
+    "NYSE":          "NYSE",
+    "NYSE Arca":     "AMEX",
+    "NYSE American": "AMEX",
+    "AMEX":          "AMEX",
+    "BATS":          "BATS",
+    "IEX":           "NYSE",   # fallback
+}
+
+def tv_symbol(ticker: str, exchange: str) -> str:
+    prefix = TV_PREFIX.get(exchange, "NYSE")
+    return f"{prefix}:{ticker}"
+
+
+def render_tv_chart(ticker: str, exchange: str, theme: str = "dark") -> str:
+    """Return self-contained HTML for a TradingView Advanced Chart widget."""
+    sym      = tv_symbol(ticker, exchange)
+    cid      = f"tv_{ticker.replace('.', '_')}"
+    return f"""
+<div id="{cid}" style="height:520px;border-radius:6px;overflow:hidden;"></div>
+<script src="https://s3.tradingview.com/tv.js"></script>
+<script>
+new TradingView.widget({{
+  container_id: "{cid}",
+  autosize: true,
+  symbol: "{sym}",
+  interval: "D",
+  timezone: "America/New_York",
+  theme: "dark",
+  style: "1",
+  locale: "en",
+  toolbar_bg: "#0e1114",
+  backgroundColor: "#080a0c",
+  gridColor: "#232a38",
+  hide_top_toolbar: false,
+  hide_legend: false,
+  save_image: false,
+  studies: [
+    "MASimple@tv-basicstudies",
+    "ATR@tv-basicstudies"
+  ],
+  studies_overrides: {{
+    "moving average.length": 50,
+    "moving average.plot.color": "rgb(245, 158, 11)"
+  }},
+  overrides: {{
+    "paneProperties.background": "#080a0c",
+    "paneProperties.backgroundType": "solid",
+    "paneProperties.vertGridProperties.color": "#1c2130",
+    "paneProperties.horzGridProperties.color": "#1c2130",
+    "scalesProperties.textColor": "#607080",
+    "mainSeriesProperties.candleStyle.upColor":   "#34d399",
+    "mainSeriesProperties.candleStyle.downColor": "#f87171",
+    "mainSeriesProperties.candleStyle.borderUpColor":   "#34d399",
+    "mainSeriesProperties.candleStyle.borderDownColor": "#f87171",
+    "mainSeriesProperties.candleStyle.wickUpColor":   "#34d399",
+    "mainSeriesProperties.candleStyle.wickDownColor": "#f87171"
+  }}
+}});
+</script>
+"""
 
 
 # Market cap tier definitions (USD)
@@ -1021,6 +1111,31 @@ if "results" in st.session_state:
             if m >= 10: return "atr-high"
             return "atr-norm"
 
+        # Init chart state
+        if "chart_ticker" not in st.session_state:
+            st.session_state["chart_ticker"] = None
+            st.session_state["chart_exchange"] = None
+
+        # Chart panel — shown when a ticker is selected
+        chart_placeholder = st.empty()
+
+        if st.session_state.get("chart_ticker"):
+            ct = st.session_state["chart_ticker"]
+            ce = st.session_state["chart_exchange"]
+            with chart_placeholder.container():
+                close_col, _ = st.columns([1, 11])
+                if close_col.button("✕  Close chart", key="close_chart"):
+                    st.session_state["chart_ticker"]   = None
+                    st.session_state["chart_exchange"]  = None
+                    chart_placeholder.empty()
+                else:
+                    st.markdown(f"""
+<div class="chart-header">
+  <span class="chart-ticker-label">{ct}</span>
+  <span class="chart-meta">{tv_symbol(ct, ce)}  ·  Daily  ·  SMA50 + ATR</span>
+</div>""", unsafe_allow_html=True)
+                    st_components.html(render_tv_chart(ct, ce), height=540, scrolling=False)
+
         COLS = 3
         for i in range(0, len(results), COLS):
             chunk = results[i:i + COLS]
@@ -1042,6 +1157,7 @@ if "results" in st.session_state:
                 badge_rvol   = f'<span class="tag tag-rvol">RVOL {r["rel_vol"]}×</span>' if r["rel_vol"] >= 1.5 else ""
                 atr_badge    = atr_cls(r["atr_mult"])
 
+                btn_key = f"chart_{r['ticker']}_{i}"
                 col.markdown(f"""
 <div class="card">
   <span class="atr-badge {atr_badge}">{r['atr_mult']}×</span>
@@ -1087,6 +1203,10 @@ if "results" in st.session_state:
   </div>
 </div>
 """, unsafe_allow_html=True)
+                if col.button(f"📈  {r['ticker']}", key=btn_key, use_container_width=True):
+                    st.session_state["chart_ticker"]   = r["ticker"]
+                    st.session_state["chart_exchange"]  = r["exchange"]
+                    st.rerun()
 
         with st.expander(f"▸  Full Results  ({n_hits} rows)"):
             disp = pd.DataFrame(results).rename(columns={
