@@ -230,8 +230,19 @@ TV_EXCHANGE_MAP = {
 }
 
 
+# Market cap tier definitions (USD)
+MCAP_TIERS = {
+    "All":        (0,             None),
+    "Micro":      (0,             300_000_000),
+    "Small":      (300_000_000,   2_000_000_000),
+    "Mid":        (2_000_000_000, 10_000_000_000),
+    "Large":      (10_000_000_000,200_000_000_000),
+    "Mega":       (200_000_000_000, None),
+}
+
 def phase1_tradingview(min_price: float, min_vol: int, prescreen_mult: float,
-                       asset_filter: str, exchange_filter: list) -> tuple[list, str | None]:
+                       asset_filter: str, exchange_filter: list,
+                       mcap_tiers: list | None = None) -> tuple[list, str | None]:
     """
     Phase 1 — TradingView scanner API.
     Single fast call covering all US exchanges. Returns candidate dicts.
@@ -267,6 +278,26 @@ def phase1_tradingview(min_price: float, min_vol: int, prescreen_mult: float,
 
         if tv_exchanges:
             q = q.where(Column("exchange").isin(tv_exchanges))
+
+        # Market cap tier filter — apply each selected tier as an OR block
+        if mcap_tiers and "All" not in mcap_tiers:
+            from tradingview_screener import Or
+            cap_conditions = []
+            for tier in mcap_tiers:
+                lo, hi = MCAP_TIERS.get(tier, (0, None))
+                if lo and hi:
+                    cap_conditions.append(
+                        (Column("market_cap_basic") >= lo) & (Column("market_cap_basic") < hi)
+                    )
+                elif lo:
+                    cap_conditions.append(Column("market_cap_basic") >= lo)
+                elif hi:
+                    cap_conditions.append(Column("market_cap_basic") < hi)
+            if cap_conditions:
+                combined = cap_conditions[0]
+                for c in cap_conditions[1:]:
+                    combined = combined | c
+                q = q.where(combined)
 
         _, df = q.get_scanner_data()
 
@@ -402,7 +433,7 @@ def phase2_confirm(candidate: dict, sma_period: int, atr_period: int,
     }
 def run_two_phase_scan(min_price, min_atr_mult, sma_period, atr_period,
                        asset_filter, exchange_filter, workers, min_vol,
-                       phase1_status_cb, phase2_progress_cb):
+                       mcap_tiers, phase1_status_cb, phase2_progress_cb):
     """
     Full two-phase scan.
     phase1_status_cb(msg, n_candidates) — called once after Phase 1 completes.
@@ -411,7 +442,7 @@ def run_two_phase_scan(min_price, min_atr_mult, sma_period, atr_period,
     # ── Phase 1 ──────────────────────────────────────────────────────────────
     prescreen_mult = min_atr_mult * 0.80   # 20% buffer for boundary cases
     candidates, err = phase1_tradingview(
-        min_price, min_vol, prescreen_mult, asset_filter, exchange_filter
+        min_price, min_vol, prescreen_mult, asset_filter, exchange_filter, mcap_tiers
     )
 
     if err:
@@ -472,6 +503,27 @@ with st.sidebar:
         "Exchanges", exchange_opts, default=exchange_opts,
         label_visibility="collapsed",
     )
+    st.markdown("""
+    <p style='font-family:"Geist Mono",monospace;font-size:0.6rem;font-weight:600;
+    letter-spacing:0.14em;color:#3d4f6b;text-transform:uppercase;
+    margin:0.9rem 0 0.3rem;display:block'>Market Cap</p>
+    <p style='font-family:"Geist Mono",monospace;font-size:0.6rem;color:#3d4f6b;
+    margin:0 0 0.4rem'>
+    Micro &lt;$300M &nbsp;·&nbsp; Small $300M–$2B<br>
+    Mid $2B–$10B &nbsp;·&nbsp; Large $10B–$200B<br>
+    Mega &gt;$200B
+    </p>
+    """, unsafe_allow_html=True)
+    mcap_tiers = st.multiselect(
+        "Market Cap Tiers",
+        ["All", "Micro", "Small", "Mid", "Large", "Mega"],
+        default=["All"],
+        label_visibility="collapsed",
+    )
+    # If "All" is selected alongside others, treat as All
+    if "All" in mcap_tiers or not mcap_tiers:
+        mcap_tiers = ["All"]
+
     min_vol = st.number_input(
         "Min Avg Volume", value=500_000, step=100_000, min_value=0,
         help="Filters warrants, ghost tickers, and illiquid symbols",
@@ -578,6 +630,7 @@ if run_btn:
         int(sma_period), int(atr_period),
         asset_filter, exchange_filter,
         workers, int(min_vol),
+        mcap_tiers,
         phase1_cb, phase2_cb,
     )
 
