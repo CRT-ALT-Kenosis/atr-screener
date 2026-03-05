@@ -294,8 +294,9 @@ def phase1_tradingview(min_price: float, min_vol: int, prescreen_mult: float,
     df["is_etf"] = df["type"].isin(["fund", "etf", "dr"])
 
     return (
-        df[["name", "close", "tv_atr_mult", "exchange", "is_etf"]]
-        .rename(columns={"name": "ticker", "close": "tv_close"})
+        df[["name", "close", "SMA50", "ATR", "tv_atr_mult", "exchange", "is_etf"]]
+        .rename(columns={"name": "ticker", "close": "tv_close",
+                         "SMA50": "tv_sma50", "ATR": "tv_atr"})
         .to_dict("records"),
         None,
     )
@@ -324,7 +325,10 @@ def phase2_confirm(candidate: dict, sma_period: int, atr_period: int,
     check — if yfinance diverges by >8% from TV, the data is unreliable and we skip.
     """
     ticker   = candidate["ticker"]
-    tv_close = candidate.get("tv_close", None)   # authoritative current price from TV
+    # TV authoritative values — used as ground truth for price & SMA sanity checks
+    tv_close = candidate.get("tv_close", None)
+    tv_sma50 = candidate.get("tv_sma50", None)
+    tv_atr   = candidate.get("tv_atr",   None)
 
     try:
         df = yf.download(ticker, period="6mo", interval="1d",
@@ -334,7 +338,6 @@ def phase2_confirm(candidate: dict, sma_period: int, atr_period: int,
         if isinstance(df.columns, pd.MultiIndex):
             df.columns = df.columns.get_level_values(0)
 
-        # Prefer unadjusted Close; fall back to Adj Close if needed
         close_col = "Close" if "Close" in df.columns else "Adj Close"
         for col in (close_col, "High", "Low", "Volume"):
             if col not in df.columns:
@@ -350,18 +353,18 @@ def phase2_confirm(candidate: dict, sma_period: int, atr_period: int,
 
         yf_last = float(close.iloc[-1])
 
-        # Cross-check yfinance vs TradingView price — if >8% apart, data is suspect
+        # ── Strict price cross-check ─────────────────────────────────────────
+        # If yfinance last close differs from TV close by >5%, yfinance is
+        # returning aliased / corporate-action-distorted data. Reject entirely.
+        # Do NOT scale — scaling fixes the last price but leaves the historical
+        # SMA computed on the wrong data series, producing garbage multiples.
         if tv_close and tv_close > 0:
-            divergence = abs(yf_last - tv_close) / tv_close
-            if divergence > 0.08:
-                # Use TV price as anchor; rebuild close series scaled to TV
-                scale  = tv_close / yf_last
-                close  = close * scale
-                high   = high   * scale
-                low    = low    * scale
-                yf_last = tv_close
+            if abs(yf_last - tv_close) / tv_close > 0.05:
+                return None
+            last_close = tv_close   # use TV's authoritative close
+        else:
+            last_close = yf_last
 
-        last_close = yf_last
         if last_close < min_price:
             return None
 
@@ -378,6 +381,16 @@ def phase2_confirm(candidate: dict, sma_period: int, atr_period: int,
 
         if pd.isna(sma) or pd.isna(atr) or float(atr) == 0 or float(sma) == 0:
             return None
+
+        # ── SMA sanity check against TV ground truth ─────────────────────────
+        # If yfinance SMA50 diverges >20% from TV's SMA50, the historical
+        # data series is corrupted (aliased ticker, bad corporate action, etc).
+        # Fall back to TV's SMA50 so the multiple stays chart-accurate.
+        if tv_sma50 and tv_sma50 > 0:
+            sma_divergence = abs(float(sma) - tv_sma50) / tv_sma50
+            if sma_divergence > 0.20:
+                # yfinance data is unreliable — reject this ticker entirely
+                return None
 
         # ── Correct formula matching jfsrev/fred6724 TradingView script ─────
         #   A = ATR%           = $ ATR / $ Last Done Price
