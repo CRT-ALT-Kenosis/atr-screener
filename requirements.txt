@@ -1,0 +1,7 @@
+streamlit>=1.32
+yfinance>=0.2.36
+pandas>=2.0
+requests>=2.31
+numpy>=1.24
+lxml>=4.9
+html5lib>=1.1
