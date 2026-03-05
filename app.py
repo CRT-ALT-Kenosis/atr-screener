@@ -185,6 +185,63 @@ html, body, [class*="css"], .stApp {
 .sig-val.neg { color:var(--red); }
 .sig-val.warn{ color:var(--amber); }
 
+.sector-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+  gap: 8px;
+  margin-bottom: 1.4rem;
+}
+.sector-card {
+  background: var(--bg1);
+  border: 1px solid var(--line);
+  border-radius: var(--r);
+  padding: 0.65rem 0.75rem;
+  position: relative;
+  overflow: hidden;
+}
+.sector-card::before {
+  content: '';
+  position: absolute; left: 0; top: 0; bottom: 0;
+  width: 3px;
+}
+.sector-card.s-cold  { border-color: var(--line); }
+.sector-card.s-warm  { border-color: rgba(45,212,191,.3); }
+.sector-card.s-hot   { border-color: rgba(245,158,11,.4); }
+.sector-card.s-fire  { border-color: rgba(248,113,113,.5); }
+.sector-card.s-cold::before  { background: var(--dim); }
+.sector-card.s-warm::before  { background: var(--teal); }
+.sector-card.s-hot::before   { background: var(--amber); }
+.sector-card.s-fire::before  { background: var(--red); }
+.sector-name {
+  font-family: 'Geist Mono', monospace;
+  font-size: 0.62rem; font-weight: 600;
+  color: var(--body); letter-spacing: 0.04em;
+  text-transform: uppercase; margin-bottom: 0.3rem;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.sector-mult {
+  font-family: 'Geist Mono', monospace;
+  font-size: 1.1rem; font-weight: 700; line-height: 1;
+}
+.sector-mult.s-cold  { color: var(--muted); }
+.sector-mult.s-warm  { color: var(--teal); }
+.sector-mult.s-hot   { color: var(--amber); }
+.sector-mult.s-fire  { color: var(--red); }
+.sector-sub {
+  font-family: 'Geist Mono', monospace;
+  font-size: 0.58rem; color: var(--dim); margin-top: 0.2rem;
+}
+.sector-bar {
+  height: 2px; border-radius: 1px;
+  margin-top: 0.45rem;
+  background: var(--line);
+  position: relative;
+}
+.sector-bar-fill {
+  height: 100%; border-radius: 1px;
+  position: absolute; left: 0; top: 0;
+}
+
 .empty-state { text-align: center; padding: 4rem 1rem; font-family: 'Geist Mono', monospace; color: var(--dim); }
 .empty-icon  { font-size: 2.4rem; margin-bottom: 0.8rem; opacity: .35; }
 .empty-text  { font-size: 0.85rem; }
@@ -367,6 +424,100 @@ def wilder_atr(high: pd.Series, low: pd.Series, close: pd.Series, period: int = 
         (low  - close.shift()).abs(),
     ], axis=1).max(axis=1)
     return tr.ewm(alpha=1 / period, min_periods=period, adjust=False).mean()
+
+
+# Sector ETF proxies — liquid, covers all 11 GICS sectors
+SECTOR_ETFS = {
+    "Technology":       "XLK",
+    "Healthcare":       "XLV",
+    "Financials":       "XLF",
+    "Consumer Disc":    "XLY",
+    "Industrials":      "XLI",
+    "Communication":    "XLC",
+    "Consumer Staples": "XLP",
+    "Energy":           "XLE",
+    "Utilities":        "XLU",
+    "Real Estate":      "XLRE",
+    "Materials":        "XLB",
+}
+
+@st.cache_data(ttl=900)   # 15-min cache
+def fetch_sector_heatmap(sma_period: int = 50, atr_period: int = 14) -> list[dict]:
+    """
+    Fetch OHLCV for each sector ETF, compute ATR× extension,
+    return sorted list for heatmap display.
+    """
+    results = []
+    tickers = list(SECTOR_ETFS.values())
+    try:
+        raw = yf.download(tickers, period="6mo", interval="1d",
+                          progress=False, auto_adjust=False, group_by="ticker")
+    except Exception:
+        return []
+
+    sector_name = {v: k for k, v in SECTOR_ETFS.items()}
+
+    for etf in tickers:
+        try:
+            if isinstance(raw.columns, pd.MultiIndex):
+                df = raw[etf].dropna(how="all")
+            else:
+                df = raw.dropna(how="all")
+
+            close = df["Close"].squeeze().dropna()
+            high  = df["High"].squeeze()
+            low   = df["Low"].squeeze()
+            if len(close) < sma_period + 5:
+                continue
+
+            last  = float(close.iloc[-1])
+            sma   = float(close.rolling(sma_period).mean().iloc[-1])
+            atr   = float(wilder_atr(high, low, close, atr_period).iloc[-1])
+
+            if sma <= 0 or atr <= 0 or last <= 0:
+                continue
+
+            atr_pct  = atr / last
+            pct_sma  = (last - sma) / sma
+            if atr_pct == 0:
+                continue
+            mult = round(pct_sma / atr_pct, 2)
+
+            prev    = float(close.iloc[-2]) if len(close) > 1 else last
+            day_chg = round((last - prev) / prev * 100, 2)
+
+            results.append({
+                "sector":   sector_name.get(etf, etf),
+                "etf":      etf,
+                "price":    round(last, 2),
+                "mult":     mult,
+                "pct_sma":  round(pct_sma * 100, 1),
+                "atr_pct":  round(atr_pct * 100, 2),
+                "day_chg":  day_chg,
+                "sma":      round(sma, 2),
+            })
+        except Exception:
+            continue
+
+    return sorted(results, key=lambda x: x["mult"], reverse=True)
+
+
+def sector_heat_class(mult: float) -> str:
+    if mult >= 10:  return "s-fire"
+    if mult >= 5:   return "s-hot"
+    if mult >= 2:   return "s-warm"
+    return "s-cold"
+
+
+def sector_bar_color(mult: float) -> str:
+    if mult >= 10:  return "var(--red)"
+    if mult >= 5:   return "var(--amber)"
+    if mult >= 2:   return "var(--teal)"
+    return "var(--dim)"
+
+
+def sector_bar_pct(mult: float, max_mult: float = 20.0) -> int:
+    return min(int(max(mult, 0) / max_mult * 100), 100)
 
 
 def phase2_confirm(candidate: dict, sma_period: int, atr_period: int,
@@ -578,20 +729,68 @@ with st.sidebar:
         unsafe_allow_html=True,
     )
 
-    st.markdown('<span class="sec-label">How it works</span>', unsafe_allow_html=True)
+    st.markdown('<span class="sec-label">ATR Extension Formula</span>', unsafe_allow_html=True)
     st.markdown("""
-    <div style="font-family:'Geist Mono',monospace;font-size:0.63rem;
-    color:#3d4f6b;line-height:2;border:1px solid #232a38;border-radius:5px;
-    padding:0.55rem 0.8rem;background:#0e1114">
-    <span style="color:#f59e0b">Phase 1</span> TradingView API<br>
-    <span style="color:#607080">→ ~2 sec, all US exchanges</span><br>
-    <span style="color:#607080">→ rough ATR× pre-screen</span><br><br>
-    <span style="color:#f59e0b">Phase 2</span> yfinance confirm<br>
-    <span style="color:#607080">→ Wilder exact ATR</span><br>
-    <span style="color:#607080">→ survivors only (~20-100)</span><br><br>
-    <span style="color:#2dd4bf">7×</span>  profit-taking zone<br>
-    <span style="color:#f59e0b">10×</span> extreme extension<br>
-    <span style="color:#f87171">15×</span> blow-off / climax
+    <div style="font-family:'Geist Mono',monospace;font-size:0.62rem;
+    color:#607080;line-height:1.9;border:1px solid #232a38;border-radius:5px;
+    padding:0.6rem 0.8rem;background:#0e1114">
+    <span style="color:#e2e8f0;font-weight:600">Formula (jfsrev / fred6724)</span><br>
+    A = ATR ÷ Price &nbsp;&nbsp;&nbsp;<span style="color:#3d4f6b">← volatility as % of price</span><br>
+    B = (Price − SMA50) ÷ SMA50 &nbsp;&nbsp;<span style="color:#3d4f6b">← % above MA</span><br>
+    <span style="color:#f59e0b">Multiple = B ÷ A</span><br><br>
+    <span style="color:#2dd4bf">7×</span> &nbsp; Start scaling out profits<br>
+    <span style="color:#f59e0b">10×</span> &nbsp; Extreme — high reversal risk<br>
+    <span style="color:#f87171">15×</span> &nbsp; Blow-off / climax top<br><br>
+    <span style="color:#3d4f6b">Think of it as a rubber band. The further<br>
+    it stretches from the 50-MA, measured in<br>
+    units of its own volatility, the harder the<br>
+    inevitable snapback.</span>
+    </div>
+    """, unsafe_allow_html=True)
+
+    st.markdown('<span class="sec-label">Qullamaggie Parabolic Short Guide</span>', unsafe_allow_html=True)
+    st.markdown("""
+    <div style="font-family:'Geist Mono',monospace;font-size:0.62rem;
+    color:#607080;line-height:1.85;border:1px solid #232a38;border-radius:5px;
+    padding:0.6rem 0.8rem;background:#0e1114">
+
+    <span style="color:#e2e8f0;font-weight:600">What to look for</span><br>
+    <span style="color:#f59e0b">Streak 3d+</span> &nbsp; Stock up 3–5 days in a row.<br>
+    &nbsp;&nbsp;<span style="color:#3d4f6b">Momentum needs time to reach euphoria.</span><br>
+    <span style="color:#f59e0b">5D Gain</span> &nbsp;&nbsp; Large caps: 50–100%+ in days.<br>
+    &nbsp;&nbsp;<span style="color:#3d4f6b">Small caps: 300–1000%+. Hype or nonsense</span><br>
+    &nbsp;&nbsp;<span style="color:#3d4f6b">news = best shorts. Fundamental guys panic.</span><br>
+    <span style="color:#f59e0b">Rel Vol</span> &nbsp;&nbsp;&nbsp; 1.5–3×+ average. Real money is in.<br>
+    &nbsp;&nbsp;<span style="color:#3d4f6b">Low rel vol = drift, not a parabolic.</span><br><br>
+
+    <span style="color:#e2e8f0;font-weight:600">⚠ DAY 1 = Do not short yet</span><br>
+    <span style="color:#3d4f6b">"I almost never short day 1. Even if they<br>
+    eventually go lower, they do too many stupid<br>
+    things." — Qullamaggie<br>
+    Let the amateur shorts get run over first.<br>
+    That squeeze is your edge.</span><br><br>
+
+    <span style="color:#e2e8f0;font-weight:600">Entry rules</span><br>
+    <span style="color:#2dd4bf">1.</span> Wait for gap-up open on a later day<br>
+    <span style="color:#2dd4bf">2.</span> Short the opening range lows (5-min)<br>
+    &nbsp;&nbsp;<span style="color:#3d4f6b">OR wait for first red 5-min candle</span><br>
+    <span style="color:#2dd4bf">3.</span> If stock bounces into VWAP and fails →<br>
+    &nbsp;&nbsp;<span style="color:#3d4f6b">that failure = your highest-conviction entry</span><br>
+    <span style="color:#2dd4bf">4.</span> NEVER short at the day's highs.<br>
+    &nbsp;&nbsp;<span style="color:#3d4f6b">"That's how you get crushed."</span><br><br>
+
+    <span style="color:#e2e8f0;font-weight:600">Risk management</span><br>
+    <span style="color:#f59e0b">Position:</span> &nbsp;10–20% of account<br>
+    <span style="color:#f59e0b">Risk:</span> &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;0.25–1% of total account<br>
+    <span style="color:#f59e0b">Stop:</span> &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;Tight. Honour it immediately.<br>
+    <span style="color:#f59e0b">Target:</span> &nbsp;&nbsp;&nbsp;5–10× risk/reward<br>
+    <span style="color:#f59e0b">Cover:</span> &nbsp;&nbsp;&nbsp;&nbsp;Fast. Don't get greedy.<br><br>
+
+    <span style="color:#e2e8f0;font-weight:600">Expected outcome on climax day</span><br>
+    <span style="color:#3d4f6b">Large caps: 5–15% downside move<br>
+    Mid/small caps: 20–30%+ downside<br>
+    "It's all about getting the right price,<br>
+    where the odds are heavily in your favor."</span>
     </div>
     """, unsafe_allow_html=True)
 
@@ -617,6 +816,64 @@ st.markdown(f"""
   <span class="status-kv">AS OF <b>{datetime.now().strftime('%H:%M')}</b></span>
 </div>
 """, unsafe_allow_html=True)
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  SECTOR HEATMAP
+# ─────────────────────────────────────────────────────────────────────────────
+st.markdown("""
+<div style="display:flex;align-items:baseline;gap:0.75rem;margin-bottom:0.6rem">
+  <span style="font-family:'Geist Mono',monospace;font-size:0.6rem;font-weight:600;
+  letter-spacing:0.14em;color:#3d4f6b;text-transform:uppercase">Sector Extension Heatmap</span>
+  <span style="font-family:'Geist Mono',monospace;font-size:0.58rem;color:#232a38">
+  ATR× from SMA50 · GICS sector ETFs · 15-min cache</span>
+</div>
+""", unsafe_allow_html=True)
+
+with st.spinner(""):
+    sectors = fetch_sector_heatmap(int(sma_period), int(atr_period))
+
+if sectors:
+    max_mult = max(s["mult"] for s in sectors) if sectors else 15.0
+    sector_html = '<div class="sector-grid">'
+    for s in sectors:
+        hc  = sector_heat_class(s["mult"])
+        bc  = sector_bar_color(s["mult"])
+        bp  = sector_bar_pct(s["mult"], max(max_mult, 1))
+        sgn = "+" if s["day_chg"] >= 0 else ""
+        chg_col = "var(--green)" if s["day_chg"] >= 0 else "var(--red)"
+        mult_disp = f"{s['mult']}×" if s["mult"] > 0 else "—"
+        sector_html += f"""
+<div class="sector-card {hc}">
+  <div class="sector-name">{s['sector']}</div>
+  <div class="sector-mult {hc}">{mult_disp}</div>
+  <div class="sector-sub">
+    <span style="color:{chg_col}">{sgn}{s['day_chg']}%</span>
+    &nbsp;·&nbsp; {s['etf']} ${s['price']}
+  </div>
+  <div class="sector-bar">
+    <div class="sector-bar-fill" style="width:{bp}%;background:{bc}"></div>
+  </div>
+</div>"""
+    sector_html += '</div>'
+    st.markdown(sector_html, unsafe_allow_html=True)
+
+    # Sector insight callout
+    hot = [s for s in sectors if s["mult"] >= 5]
+    if hot:
+        top = hot[0]
+        insight = f"<span style='color:var(--amber);font-weight:600'>{top['sector']}</span> is the most extended sector at <span style='color:var(--amber)'>{top['mult']}×</span> ATR from its SMA50. "
+        if len(hot) > 1:
+            others = ", ".join(f"<span style='color:var(--text)'>{h['sector']} ({h['mult']}×)</span>" for h in hot[1:3])
+            insight += f"Also elevated: {others}."
+        callout_style = (
+            "font-family:'Geist Mono',monospace;font-size:0.65rem;"
+            "color:var(--muted);margin-bottom:1rem;padding:0.5rem 0.75rem;"
+            "background:var(--bg2);border:1px solid var(--line2);border-radius:5px"
+        )
+        st.markdown(
+            f"<p style='{callout_style}'>◈ {insight}</p>",
+            unsafe_allow_html=True
+        )
 
 
 # ─────────────────────────────────────────────────────────────────────────────
