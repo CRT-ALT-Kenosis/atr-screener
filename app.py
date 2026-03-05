@@ -474,8 +474,7 @@ def phase2_confirm(candidate: dict, sma_period: int, atr_period: int,
     }
 def run_two_phase_scan(min_price, min_atr_mult, sma_period, atr_period,
                        asset_filter, exchange_filter, workers, min_vol,
-                       mcap_tiers, min_consec_days, min_gain_5d, min_rel_vol,
-                       hide_day1, phase1_status_cb, phase2_progress_cb):
+                       mcap_tiers, phase1_status_cb, phase2_progress_cb):
     """
     Full two-phase scan.
     phase1_status_cb(msg, n_candidates) — called once after Phase 1 completes.
@@ -511,16 +510,6 @@ def run_two_phase_scan(min_price, min_atr_mult, sma_period, atr_period,
             res = fut.result()
             if res:
                 results.append(res)
-
-    # ── Post-scan Qullamaggie filters ─────────────────────────────────────────
-    if hide_day1:
-        results = [r for r in results if not r["is_day1"]]
-    if min_consec_days > 0:
-        results = [r for r in results if r["consec_days"] >= min_consec_days]
-    if min_gain_5d > 0:
-        results = [r for r in results if r["gain_5d"] >= min_gain_5d]
-    if min_rel_vol > 0:
-        results = [r for r in results if r["rel_vol"] >= min_rel_vol]
 
     return sorted(results, key=lambda x: x["atr_mult"], reverse=True)
 
@@ -579,26 +568,6 @@ with st.sidebar:
     min_vol = st.number_input(
         "Min Avg Volume", value=500_000, step=100_000, min_value=0,
         help="Filters warrants, ghost tickers, and illiquid symbols",
-    )
-
-    st.markdown('<span class="sec-label">Qullamaggie Filters</span>', unsafe_allow_html=True)
-    hide_day1 = st.toggle(
-        "Hide Day 1 setups",
-        value=True,
-        help="Qullamaggie never shorts day 1 — too erratic. Hides stocks where streak = 1.",
-    )
-    min_consec_days = st.slider(
-        "Min consecutive green days", 0, 7, 3,
-        help="Qullamaggie requires 3–5+ days up in a row before considering a short.",
-        label_visibility="visible",
-    )
-    min_gain_5d = st.number_input(
-        "Min 5-day gain (%)", value=0.0, step=5.0, min_value=0.0,
-        help="Large caps need 50–100%+ in days/weeks. Small caps 300–1000%+.",
-    )
-    min_rel_vol = st.number_input(
-        "Min Relative Volume", value=1.0, step=0.5, min_value=0.0,
-        help="High rel vol (1.5–3×+) confirms the parabolic is real, not drift.",
     )
 
     st.markdown('<span class="sec-label">Performance</span>', unsafe_allow_html=True)
@@ -703,8 +672,6 @@ if run_btn:
         asset_filter, exchange_filter,
         workers, int(min_vol),
         mcap_tiers,
-        int(min_consec_days), float(min_gain_5d), float(min_rel_vol),
-        hide_day1,
         phase1_cb, phase2_cb,
     )
 
