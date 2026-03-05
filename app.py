@@ -1026,21 +1026,32 @@ if "results" in st.session_state:
             chunk = results[i:i + COLS]
             cols  = st.columns(COLS)
             for col, r in zip(cols, chunk):
-                chg_cls  = "pos" if r["day_chg"] >= 0 else "neg"
-                chg_sign = "+" if r["day_chg"] >= 0 else ""
-                type_lbl = "ETF" if r["is_etf"] else "STOCK"
-                type_cls = "tag-etf" if r["is_etf"] else "tag-stock"
+                # ── pre-compute all variable HTML to avoid f-string quote conflicts ──
+                day_chg_val  = round(float(r["day_chg"]), 2)
+                chg_cls      = "pos" if day_chg_val >= 0 else "neg"
+                chg_sign     = "+" if day_chg_val >= 0 else ""
+                type_lbl     = "ETF" if r["is_etf"] else "STOCK"
+                type_cls     = "tag-etf" if r["is_etf"] else "tag-stock"
+                gain_5d_val  = round(float(r["gain_5d"]), 1)
+                gain_cls     = "pos" if gain_5d_val >= 0 else "neg"
+                gain_sign    = "+" if gain_5d_val >= 0 else ""
+                rvol_cls     = "warn" if r["rel_vol"] >= 2 else ""
+                streak       = int(r["consec_days"])
+                badge_day1   = '<span class="tag tag-day1">⚠ DAY 1</span>' if r["is_day1"] else ""
+                badge_streak = f'<span class="tag tag-streak">🔥 {streak}d</span>' if streak >= 3 else ""
+                badge_rvol   = f'<span class="tag tag-rvol">RVOL {r["rel_vol"]}×</span>' if r["rel_vol"] >= 1.5 else ""
+                atr_badge    = atr_cls(r["atr_mult"])
 
                 col.markdown(f"""
 <div class="card">
-  <span class="atr-badge {atr_cls(r['atr_mult'])}">{r['atr_mult']}×</span>
+  <span class="atr-badge {atr_badge}">{r['atr_mult']}×</span>
   <div class="card-ticker">{r['ticker']}</div>
   <div class="card-price">${r['price']:,.2f}</div>
   <div class="card-divider"></div>
   <div class="card-stats">
     <div>
       <span class="stat-k">Day Chg</span>
-      <span class="stat-v {chg_cls}">{chg_sign}{r['day_chg']}%</span>
+      <span class="stat-v {chg_cls}">{chg_sign}{day_chg_val}%</span>
     </div>
     <div>
       <span class="stat-k">vs SMA{sma_lbl}</span>
@@ -1058,23 +1069,21 @@ if "results" in st.session_state:
   <div class="signal-row">
     <div class="sig-cell">
       <span class="sig-label">5D Gain</span>
-      <span class="sig-val {'pos' if r['gain_5d']>=0 else 'neg'}">{'+' if r['gain_5d']>=0 else ''}{r['gain_5d']}%</span>
+      <span class="sig-val {gain_cls}">{gain_sign}{gain_5d_val}%</span>
     </div>
     <div class="sig-cell">
       <span class="sig-label">Rel Vol</span>
-      <span class="sig-val {'warn' if r['rel_vol']>=2 else ''}">{r['rel_vol']}×</span>
+      <span class="sig-val {rvol_cls}">{r['rel_vol']}×</span>
     </div>
     <div class="sig-cell">
       <span class="sig-label">Streak</span>
-      <span class="sig-val warn">{r['consec_days']}d ↑</span>
+      <span class="sig-val warn">{streak}d ↑</span>
     </div>
   </div>
   <div class="card-tags">
     <span class="tag {type_cls}">{type_lbl}</span>
     <span class="tag tag-exch">{r['exchange']}</span>
-    {'<span class="tag tag-day1">⚠ DAY 1</span>' if r['is_day1'] else ''}
-    {'<span class="tag tag-streak">🔥 ' + str(r['consec_days']) + 'd</span>' if r['consec_days'] >= 3 else ''}
-    {'<span class="tag tag-rvol">RVOL ' + str(r['rel_vol']) + '×</span>' if r['rel_vol'] >= 1.5 else ''}
+    {badge_day1}{badge_streak}{badge_rvol}
   </div>
 </div>
 """, unsafe_allow_html=True)
