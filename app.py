@@ -279,8 +279,11 @@ def phase1_tradingview(min_price: float, min_vol: int, prescreen_mult: float,
     df = df.dropna(subset=["close", "SMA50", "ATR"])
     df = df[df["ATR"] > 0]
 
-    # Compute rough ATR multiple from TV data (ATR is always 14-period from TV)
-    df["tv_atr_mult"] = (df["close"] - df["SMA50"]) / df["ATR"]
+    # Compute rough ATR multiple using the correct jfsrev/fred6724 formula:
+    #   A = ATR% = ATR / Close
+    #   B = % gain from SMA50 = (Close - SMA50) / SMA50
+    #   Multiple = B / A
+    df["tv_atr_mult"] = ((df["close"] - df["SMA50"]) / df["SMA50"]) / (df["ATR"] / df["close"])
 
     # Pre-filter at 80% of threshold — catches exact-boundary cases
     df = df[df["tv_atr_mult"] >= prescreen_mult]
@@ -373,16 +376,23 @@ def phase2_confirm(candidate: dict, sma_period: int, atr_period: int,
         sma = close.rolling(sma_period).mean().iloc[-1]
         atr = wilder_atr(high, low, close, atr_period).iloc[-1]
 
-        if pd.isna(sma) or pd.isna(atr) or float(atr) == 0:
+        if pd.isna(sma) or pd.isna(atr) or float(atr) == 0 or float(sma) == 0:
             return None
 
-        atr_mult = (last_close - float(sma)) / float(atr)
+        # ── Correct formula matching jfsrev/fred6724 TradingView script ─────
+        #   A = ATR%           = $ ATR / $ Last Done Price
+        #   B = % Gain from SMA = (Close - SMA50) / SMA50
+        #   Multiple = B / A  (NOT dollar-distance (Close-SMA)/ATR)
+        atr_pct  = float(atr) / last_close                      # A
+        pct_sma  = (last_close - float(sma)) / float(sma)       # B (decimal)
+        atr_mult = pct_sma / atr_pct                            # B / A
 
-        # Final threshold gate — exact Wilder ATR must confirm
+        atr_pct_disp = round(atr_pct * 100, 2)   # e.g. 2.82
+        pct_sma_disp = round(pct_sma * 100, 1)   # e.g. 14.5
+
         if atr_mult < min_atr_mult:
             return None
 
-        pct_sma = (last_close - float(sma)) / float(sma) * 100
         prev    = float(close.iloc[-2]) if len(close) > 1 else last_close
         day_chg = (last_close - prev) / prev * 100
 
@@ -398,7 +408,8 @@ def phase2_confirm(candidate: dict, sma_period: int, atr_period: int,
             "tv_atr_mult": round(candidate["tv_atr_mult"], 2),
             "sma":         round(float(sma), 2),
             "atr":         round(float(atr), 2),
-            "pct_sma":     round(pct_sma, 1),
+            "atr_pct":     atr_pct_disp,
+            "pct_sma":     pct_sma_disp,
             "day_chg":     round(day_chg, 2),
             "avg_vol":     _fmt_vol(avg_vol),
             "is_etf":      candidate["is_etf"],
@@ -704,8 +715,8 @@ if "results" in st.session_state:
       <span class="stat-v pos">+{r['pct_sma']}%</span>
     </div>
     <div>
-      <span class="stat-k">ATR{atr_lbl}</span>
-      <span class="stat-v">${r['atr']:,.2f}</span>
+      <span class="stat-k">ATR%</span>
+      <span class="stat-v">{r['atr_pct']}%</span>
     </div>
     <div>
       <span class="stat-k">Avg Vol</span>
@@ -736,11 +747,12 @@ if "results" in st.session_state:
                 "exchange":    "Exchange",
                 "is_etf":      "ETF",
                 "price":       "Price",
-                "atr_mult":    "Confirmed ATR×",
-                "tv_atr_mult": "TV ATR×",
+                "atr_mult":    "ATR× (B/A)",
+                "tv_atr_mult": "TV ATR× (pre-screen)",
                 "sma":         f"SMA{sma_lbl}",
-                "atr":         f"ATR{atr_lbl}",
-                "pct_sma":     f"% Above SMA{sma_lbl}",
+                "atr":         f"ATR{atr_lbl} $",
+                "atr_pct":     "ATR% (A)",
+                "pct_sma":     "% Above SMA (B)",
                 "day_chg":     "Day Chg %",
                 "avg_vol":     "Avg Volume",
             })
