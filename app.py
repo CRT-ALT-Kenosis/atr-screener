@@ -430,6 +430,7 @@ def phase1_tradingview(min_price: float, min_vol: int, prescreen_mult: float,
                 Column("close") > min_price,
                 Column("volume") > min_vol,
                 Column("close") > Column("SMA50"),  # must be above SMA to have positive multiple
+                Column("Perf.5D") >= 15,            # PS4a: min 15% 5D gain -- active parabolic run in progress
             )
             .order_by("volume", ascending=False)
             .limit(2000)
@@ -473,6 +474,8 @@ def phase1_tradingview(min_price: float, min_vol: int, prescreen_mult: float,
 
     df = df.dropna(subset=["close", "SMA50", "ATR"])
     df = df[df["ATR"] > 0]
+    # U1: ADR > 5% -- Kristjan's hard requirement; low-ADR stocks can't move enough to profit on a short
+    df = df[(df["ATR"] / df["close"] * 100) >= 5]
     # Fill optional fields with safe defaults
     for col in ["Perf.5D", "Perf.1M", "relative_volume_10d_calc", "change", "gap"]:
         if col not in df.columns:
@@ -817,6 +820,8 @@ def phase1_ep(min_gap_pct: float, min_vol: int, min_price: float,
     for col in ["gap", "relative_volume_10d_calc", "change", "Perf.1M", "Perf.3M", "Perf.6M", "SMA50", "ATR"]:
         if col not in df.columns: df[col] = 0.0
     df = df.fillna(0.0)
+    # U1: ADR >= 3% floor -- removes truly non-tradeable low-vol stocks
+    df = df[(df["ATR"] / df["close"] * 100) >= 3]
     df["is_etf"] = df["type"].isin(["fund", "etf", "dr"])
 
     return (
@@ -994,6 +999,7 @@ def phase1_breakout(min_perf_1m: float, min_vol: int, min_price: float,
                 Column("volume") > min_vol,
                 Column("Perf.1M") >= min_perf_1m,
                 Column("close") > Column("SMA50"),      # above long-term MA
+                Column("close") < Column("SMA10") * 1.12,  # BO6: within 12% of 10-day -- surfing MA, not extended above it
                 Column("relative_volume_10d_calc") < 1.5,  # volume drying up = consolidation
             )
             .order_by("Perf.3M", ascending=False)
@@ -1031,6 +1037,8 @@ def phase1_breakout(min_perf_1m: float, min_vol: int, min_price: float,
                 "change", "Perf.1M", "Perf.3M", "Perf.6M"]:
         if col not in df.columns: df[col] = 0.0
     df = df.fillna(0.0)
+    # U1: ADR >= 3% floor -- removes truly non-tradeable low-vol stocks
+    df = df[(df["ATR"] / df["close"] * 100) >= 3]
     df["is_etf"] = df["type"].isin(["fund", "etf", "dr"])
 
     return (
@@ -1069,6 +1077,7 @@ def phase2_breakout_confirm(candidate: dict, min_vol: int, min_price: float = 0.
     avg_vol  = None
     range_tightness = None
     consec   = 0
+    higher_lows = False
     day_chg  = float(candidate.get("day_chg") or 0)
     prior_ep = False          # had a big gap-up (>8%) in past 60 days?
     prior_ep_days_ago = None
@@ -1093,6 +1102,13 @@ def phase2_breakout_confirm(candidate: dict, min_vol: int, min_price: float = 0.
                 if len(closes) >= 10:
                     recent_range = ((highs.tail(10) - lows.tail(10)) / closes.tail(10)).mean()
                     range_tightness = round(float(recent_range) * 100, 1)
+                # BO5: Higher lows check -- orderly pullback with each swing low >= prior
+                # Check the last 5 daily lows: count how many are >= the prior day's low
+                if len(lows) >= 6:
+                    recent_lows = lows.tail(6).values
+                    hl_count = sum(1 for i in range(1, len(recent_lows))
+                                   if recent_lows[i] >= recent_lows[i-1])
+                    higher_lows = hl_count >= 3  # at least 3 of 5 comparisons show rising lows
                 if len(closes) >= 2:
                     for i in range(len(closes) - 1, 0, -1):
                         if float(closes.iloc[i]) > float(closes.iloc[i - 1]):
@@ -1137,7 +1153,8 @@ def phase2_breakout_confirm(candidate: dict, min_vol: int, min_price: float = 0.
     momentum_score  = min(float(candidate.get("gain_3m") or 0) / 10, 10)
     prior_ep_bonus  = 2.0 if prior_ep else 0.0   # prior EP = higher conviction
     nasdaq_bonus    = 0.5 if candidate.get("exchange") == "NASDAQ" else 0.0
-    setup_score     = round(tightness_score * 0.4 + proximity_score * 0.4 + momentum_score * 0.2 + prior_ep_bonus + nasdaq_bonus, 1)
+    hl_bonus        = 1.5 if higher_lows else 0.0  # BO5: orderly higher-lows structure
+    setup_score     = round(tightness_score * 0.4 + proximity_score * 0.4 + momentum_score * 0.2 + prior_ep_bonus + nasdaq_bonus + hl_bonus, 1)
 
     return {
         "ticker":           ticker,
@@ -1159,6 +1176,7 @@ def phase2_breakout_confirm(candidate: dict, min_vol: int, min_price: float = 0.
         "dv_disp":          dv_disp,
         "liq_warn":         liq_warn,
         "consec_days":      consec,
+        "higher_lows":      higher_lows,
         "prior_ep":         prior_ep,
         "prior_ep_days_ago": prior_ep_days_ago,
         "setup_score":      setup_score,
@@ -1256,6 +1274,8 @@ def phase1_parabolic_long(min_drop_5d: float, min_vol: int, min_price: float,
                 "SMA10", "SMA20", "ATR", "gap"]:
         if col not in df.columns: df[col] = 0.0
     df = df.fillna(0.0)
+    # U1: ADR >= 3% floor -- removes truly non-tradeable low-vol stocks
+    df = df[(df["ATR"] / df["close"] * 100) >= 3]
     df["is_etf"] = df["type"].isin(["fund", "etf", "dr"])
 
     return (
@@ -1977,6 +1997,7 @@ with tab_bo:
                     prior_ep  = r.get("prior_ep", False)
                     ep_days   = r.get("prior_ep_days_ago")
                     ep_badge  = f'<span class="tag tag-rvol">⚡ EP {ep_days}d ago</span>' if prior_ep and ep_days else ('<span class="tag tag-rvol">⚡ PRIOR EP</span>' if prior_ep else "")
+                    hl_badge  = '<span class="tag" style="background:rgba(52,211,153,.12);color:#34d399;border:1px solid rgba(52,211,153,.3)">↑ HIGHER LOWS</span>' if r.get("higher_lows") else ""
                     liq_b     = '<span class="tag" style="background:rgba(248,113,113,.12);color:#f87171;border:1px solid rgba(248,113,113,.3)">⚠ &lt;$3M DV</span>' if r.get("liq_warn") else ""
                     dv_disp   = r.get("dv_disp", "N/A")
                     gain_6m   = r.get("gain_6m", 0)
@@ -2003,7 +2024,7 @@ with tab_bo:
   <div class="card-tags">
     <span class="tag {type_cls}">{type_lbl}</span>
     <span class="tag tag-exch">{r['exchange']}</span>
-    {ep_badge}{liq_b}
+    {ep_badge}{hl_badge}{liq_b}
   </div>
 </div>""", unsafe_allow_html=True)
                     if col.button(f"📈  {r['ticker']}", key=btn_key, use_container_width=True):
