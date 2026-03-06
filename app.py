@@ -173,6 +173,24 @@ html, body, [class*="css"], .stApp {
 .tag-streak{ background:rgba(245,158,11,.10);  color:var(--amber); border:1px solid rgba(245,158,11,.25); }
 .tag-rvol  { background:rgba(96,165,250,.10);  color:var(--blue);  border:1px solid rgba(96,165,250,.25); }
 
+/* Playbook criteria checklist on cards */
+.criteria-grid {
+  margin-top: 0.55rem; padding-top: 0.5rem; border-top: 1px solid var(--line);
+  display: grid; grid-template-columns: 1fr 1fr; gap: 0.22rem 0.4rem;
+}
+.crit {
+  font-family: 'Geist Mono', monospace; font-size: 0.58rem;
+  display: flex; align-items: flex-start; gap: 0.25rem; line-height: 1.3;
+}
+.crit-icon { font-size: 0.6rem; flex-shrink: 0; margin-top: 0.05rem; }
+.crit-text { color: var(--muted); }
+.crit.pass .crit-icon { color: var(--green); }
+.crit.pass .crit-text { color: var(--text); }
+.crit.warn .crit-icon { color: var(--amber); }
+.crit.warn .crit-text { color: var(--amber); }
+.crit.fail .crit-icon { color: var(--red); }
+.crit.fail .crit-text { color: var(--dim); }
+
 /* Qullamaggie signal row */
 .signal-row {
   display:grid; grid-template-columns:repeat(3,1fr); gap:0.35rem;
@@ -1682,6 +1700,11 @@ Also elevated: {others_txt}
   <div class="empty-hint">Try lowering Min ATR Multiple or broadening universe filters</div>
 </div>""", unsafe_allow_html=True)
         else:
+            def crit(status, text):
+                """Build one criteria row: status='pass'|'warn'|'fail', text=display string."""
+                icon = "✓" if status == "pass" else ("▲" if status == "warn" else "✗")
+                return f'<div class="crit {status}"><span class="crit-icon">{icon}</span><span class="crit-text">{text}</span></div>'
+
             def atr_cls(m):
                 if m >= 15: return "atr-extreme"
                 if m >= 10: return "atr-high"
@@ -1711,6 +1734,24 @@ Also elevated: {others_txt}
                     badge_rvol   = f'<span class="tag tag-rvol">RVOL {r["rel_vol"]}×</span>' if r["rel_vol"] >= 1.5 else ""
                     atr_badge    = atr_cls(r["atr_mult"])
                     btn_key      = f"ps_chart_{r['ticker']}_{i}"
+                    # --- PS Playbook criteria ---
+                    _atr = r["atr_mult"]
+                    _g5  = gain_5d_val
+                    _str = streak
+                    _rv  = r["rel_vol"]
+                    _atr_s = "pass" if _atr >= 15 else ("warn" if _atr >= 10 else "fail")
+                    _atr_t = f"ATR {_atr}× {'— blow-off' if _atr >= 15 else '— extreme' if _atr >= 10 else '— need ≥10×'}"
+                    _g5_s  = "pass" if _g5 >= 20 else ("warn" if _g5 >= 10 else "fail")
+                    _g5_t  = f"5D +{_g5}% {'— active run ✓' if _g5 >= 20 else '— borderline' if _g5 >= 10 else '— need ≥20%'}"
+                    _str_s = "pass" if _str >= 3 else ("warn" if _str >= 2 else "fail")
+                    _str_t = f"Streak {_str}d {'— shortable' if _str >= 3 else '— almost' if _str == 2 else '— wait for day 3'}"
+                    _rv_s  = "pass" if _rv >= 1.5 else ("warn" if _rv >= 0.8 else "fail")
+                    _rv_t  = f"Rel vol {_rv}× {'— elevated ✓' if _rv >= 1.5 else '— avg' if _rv >= 0.8 else '— low volume'}"
+                    _d1_s  = "fail" if r["is_day1"] else "pass"
+                    _d1_t  = "Day 1 — too early to short" if r["is_day1"] else f"Day {_str} — not day 1 ✓"
+                    ps_criteria = (crit(_atr_s, _atr_t) + crit(_g5_s, _g5_t) +
+                                   crit(_str_s, _str_t) + crit(_rv_s, _rv_t) +
+                                   crit(_d1_s, _d1_t))
                     col.markdown(f"""
 <div class="card">
   <span class="atr-badge {atr_badge}">{r['atr_mult']}×</span>
@@ -1728,6 +1769,7 @@ Also elevated: {others_txt}
     <div class="sig-cell"><span class="sig-label">Rel Vol</span><span class="sig-val {rvol_cls}">{r['rel_vol']}×</span></div>
     <div class="sig-cell"><span class="sig-label">Streak</span><span class="sig-val warn">{streak}d ↑</span></div>
   </div>
+  <div class="criteria-grid">{ps_criteria}</div>
   <div class="card-tags">
     <span class="tag {type_cls}">{type_lbl}</span>
     <span class="tag tag-exch">{r['exchange']}</span>
@@ -1859,6 +1901,25 @@ padding:0.6rem 1rem;margin-bottom:0.9rem;font-family:'Geist Mono',monospace;font
                     dv_disp   = r.get("dv_disp", "N/A")
                     float_disp = r.get("float_disp", "N/A")
                     gain_1m   = r.get("gain_1m", 0)
+                    # --- EP Playbook criteria ---
+                    _gap  = gap_val
+                    _rv   = rvol_val
+                    _negl = r.get("neglected", False)
+                    _lf   = r.get("low_float", False)
+                    _hs   = r.get("high_short", False)
+                    _gap_s  = "pass" if _gap >= 10 else ("warn" if _gap >= 8 else "fail")
+                    _gap_t  = f"Gap +{_gap}% {'— strong ✓' if _gap >= 15 else '— ideal' if _gap >= 10 else '— borderline'}"
+                    _rv_s   = "pass" if _rv >= 5 else ("warn" if _rv >= 3 else "fail")
+                    _rv_t   = f"Vol {_rv}× {'— unmistakable ✓' if _rv >= 5 else '— solid' if _rv >= 3 else '— needs more volume'}"
+                    _negl_s = "pass" if _negl else "warn"
+                    _negl_t = "Neglected 3-6m+ ✓ — best EPs" if _negl else "No prior neglect — higher fail rate"
+                    _lf_s   = "pass" if _lf else "warn"
+                    _lf_t   = "Low float — amplified move ✓" if _lf else "Normal float — standard EP"
+                    _hs_s   = "pass" if _hs else "warn"
+                    _hs_t   = "High short interest — squeeze fuel ✓" if _hs else "No short squeeze catalyst"
+                    ep_criteria = (crit(_gap_s, _gap_t) + crit(_rv_s, _rv_t) +
+                                   crit(_negl_s, _negl_t) + crit(_lf_s, _lf_t) +
+                                   crit(_hs_s, _hs_t))
                     col.markdown(f"""
 <div class="card">
   <span class="atr-badge atr-norm" style="background:rgba(99,102,241,0.15);color:#818cf8;border-color:#4f46e5">EP</span>
@@ -1878,6 +1939,7 @@ padding:0.6rem 1rem;margin-bottom:0.9rem;font-family:'Geist Mono',monospace;font
     <div class="sig-cell"><span class="sig-label">6M Perf</span><span class="stat-v">{r['gain_6m']}%</span></div>
     <div class="sig-cell"><span class="sig-label">Streak</span><span class="sig-val">{r['consec_days']}d ↑</span></div>
   </div>
+  <div class="criteria-grid">{ep_criteria}</div>
   <div class="card-tags">
     <span class="tag {type_cls}">{type_lbl}</span>
     <span class="tag tag-exch">{r['exchange']}</span>
@@ -2002,6 +2064,28 @@ with tab_bo:
                     dv_disp   = r.get("dv_disp", "N/A")
                     gain_6m   = r.get("gain_6m", 0)
                     btn_key   = f"bo_chart_{r['ticker']}_{i}"
+                    # --- BO Playbook criteria ---
+                    _tight = r.get("range_tightness") or 99
+                    _d10   = abs(r.get("dist_10") or 99)
+                    _hl    = r.get("higher_lows", False)
+                    _rv    = r.get("rel_vol", 0)
+                    _ep    = prior_ep
+                    _g3    = r.get("gain_3m", 0)
+                    _tight_s = "pass" if _tight <= 3 else ("warn" if _tight <= 6 else "fail")
+                    _tight_t = f"Range tight {_tight}% {'— ideal base ✓' if _tight <= 3 else '— acceptable' if _tight <= 6 else '— too loose'}"
+                    _d10_s   = "pass" if _d10 <= 5 else ("warn" if _d10 <= 12 else "fail")
+                    _d10_t   = f"{'Surfing' if _d10 <= 5 else 'Near' if _d10 <= 12 else 'Far from'} SMA10 ({_d10:.0f}% off) {'✓' if _d10 <= 5 else ''}"
+                    _hl_s    = "pass" if _hl else "warn"
+                    _hl_t    = "Higher lows ✓ — orderly structure" if _hl else "No higher lows — choppier base"
+                    _rv_s    = "pass" if _rv <= 1.5 else ("warn" if _rv <= 2.5 else "fail")
+                    _rv_t    = f"Rel vol {_rv}× {'— drying up ✓' if _rv <= 1.0 else '— quiet' if _rv <= 1.5 else '— volume elevated'}"
+                    _ep_s    = "pass" if _ep else "warn"
+                    _ep_t    = "Prior EP in base ✓ — institutional buy" if _ep else "No prior EP — momentum only"
+                    _mom_s   = "pass" if _g3 >= 30 else ("warn" if _g3 >= 15 else "fail")
+                    _mom_t   = f"3M +{_g3}% {'— top 1-2% ✓' if _g3 >= 30 else '— building' if _g3 >= 15 else '— need stronger trend'}"
+                    bo_criteria = (crit(_tight_s, _tight_t) + crit(_d10_s, _d10_t) +
+                                   crit(_hl_s, _hl_t) + crit(_rv_s, _rv_t) +
+                                   crit(_ep_s, _ep_t) + crit(_mom_s, _mom_t))
                     col.markdown(f"""
 <div class="card">
   <span class="atr-badge atr-norm" style="background:rgba(52,211,153,0.12);color:#34d399;border-color:#059669">{sc}</span>
@@ -2021,6 +2105,7 @@ with tab_bo:
     <div class="sig-cell"><span class="sig-label">Rel Vol</span><span class="sig-val">{r['rel_vol']}×</span></div>
     <div class="sig-cell"><span class="sig-label">Streak</span><span class="sig-val">{r['consec_days']}d ↑</span></div>
   </div>
+  <div class="criteria-grid">{bo_criteria}</div>
   <div class="card-tags">
     <span class="tag {type_cls}">{type_lbl}</span>
     <span class="tag tag-exch">{r['exchange']}</span>
@@ -2144,6 +2229,25 @@ with tab_pl:
                     high_score = sc >= 7
                     badge_coil = '<span class="tag tag-streak">🔥 COILED</span>' if high_score else ""
                     btn_key   = f"pl_chart_{r['ticker']}_{i}"
+                    # --- PL Playbook criteria ---
+                    _drop  = abs(float(r.get("drop_5d", 0)))
+                    _ddays = int(r.get("consec_down", 0))
+                    _rv    = float(r.get("rel_vol", 0))
+                    _today = float(r.get("day_chg", 0))
+                    _dfh   = abs(float(r.get("drop_from_high") or 0))
+                    _drop_s  = "pass" if _drop >= 40 else ("warn" if _drop >= 30 else "fail")
+                    _drop_t  = f"5D drop {_drop:.0f}% {'— parabolic collapse ✓' if _drop >= 40 else '— decent' if _drop >= 30 else '— not steep enough'}"
+                    _dd_s    = "pass" if _ddays >= 5 else ("warn" if _ddays >= 3 else "fail")
+                    _dd_t    = f"{_ddays} down days {'— fully washed ✓' if _ddays >= 5 else '— building' if _ddays >= 3 else '— need more selling'}"
+                    _rv_s    = "pass" if _rv >= 2 else ("warn" if _rv >= 1.5 else "fail")
+                    _rv_t    = f"Rel vol {_rv}× {'— panic confirmed ✓' if _rv >= 2 else '— elevated' if _rv >= 1.5 else '— vol too light'}"
+                    _today_s = "pass" if _today >= 0.5 else ("warn" if _today >= 0 else "fail")
+                    _today_t = f"Today +{_today:.1f}% — first green day ✓" if _today >= 0 else f"Today {_today:.1f}% — still red, wait"
+                    _dfh_s   = "pass" if _dfh >= 50 else ("warn" if _dfh >= 35 else "fail")
+                    _dfh_t   = f"Off high {_dfh:.0f}% {'— deep reset ✓' if _dfh >= 50 else '— decent' if _dfh >= 35 else '— not enough washout'}"
+                    pl_criteria = (crit(_drop_s, _drop_t) + crit(_dd_s, _dd_t) +
+                                   crit(_rv_s, _rv_t) + crit(_today_s, _today_t) +
+                                   crit(_dfh_s, _dfh_t))
                     col.markdown(f"""
 <div class="card">
   <span class="atr-badge atr-norm" style="background:rgba(52,211,153,0.12);color:#34d399;border-color:#059669">{sc}</span>
@@ -2161,6 +2265,7 @@ with tab_pl:
     <div class="sig-cell"><span class="sig-label">Down Days</span><span class="sig-val neg">{r['consec_down']}d ↓</span></div>
     <div class="sig-cell"><span class="sig-label">From High</span><span class="sig-val neg">{dfh_str}</span></div>
   </div>
+  <div class="criteria-grid">{pl_criteria}</div>
   <div class="card-tags">
     <span class="tag {type_cls}">{type_lbl}</span>
     <span class="tag tag-exch">{r['exchange']}</span>
