@@ -1968,7 +1968,7 @@ Jeff Sun / jfsrev — Daily Market Dashboard · Breadth · Indices · Sectors ·
     with col_btn:
         refresh = st.button("⟳  Refresh", key="dash_refresh", use_container_width=True)
         if refresh:
-            fetch_ticker_metrics.clear()
+            fetch_group_metrics.clear()
             fetch_breadth_from_tv.clear()
 
     # ── state: load-once flag ───────────────────────────────────────────────────
@@ -3459,5 +3459,4 @@ with tab_guide:
 "It will take 3-4 earnings seasons to get good at trading EP, 5-6 if you are a moron. For me it probably took 7 or 8."
 <span>-- Kristjan Kullamägi</span>
 </div>
-""", unsafe_allow_html=True)
-
+""", unsafe_allow_html=True)    
