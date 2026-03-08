@@ -1922,8 +1922,10 @@ with tab_dash:
 }
 .style-cell {
   background: var(--bg2); border: 1px solid var(--line); border-radius: 6px;
-  padding: 0.65rem 0.8rem; text-align: center;
+  padding: 0.65rem 0.8rem; text-align: center; transition: background 0.2s;
 }
+.style-cell.day-neg { background: rgba(248,113,113,0.10); border-color: rgba(248,113,113,0.30); }
+.style-cell.day-pos { background: rgba(52,211,153,0.08);  border-color: rgba(52,211,153,0.25);  }
 .style-label { font-family: 'Geist Mono', monospace; font-size: 0.55rem;
                color: var(--dim); text-transform: uppercase; letter-spacing: 0.1em; }
 .style-val   { font-family: 'Geist Mono', monospace; font-size: 0.9rem;
@@ -2143,10 +2145,14 @@ Jeff Sun / jfsrev — Daily Market Dashboard · Breadth · Indices · Sectors ·
         dc  = _color(d["day_chg"])
         mc  = _color(d["perf_1m"])
         hc  = _color(d["pct_52h"], -5, -15, reverse=True)
-        bar_pct = max(0, min(100, d["pct_52l"] / (d["pct_52l"] - d["pct_52h"] + 0.001) * 100)) if d["pct_52l"] else 0
+        day_tint = "day-neg" if d["day_chg"] < -0.1 else ("day-pos" if d["day_chg"] > 0.1 else "")
+        # Correct linear range position: accounts for different bases of pct_52h (vs high) and pct_52l (vs low)
+        a, b = d["pct_52l"], d["pct_52h"]   # a > 0, b < 0
+        denom = (a - b)
+        bar_pct = max(0, min(100, a * (1 + b / 100) / denom * 100)) if denom > 0.01 else 50
         bar_c = "#34d399" if bar_pct > 65 else ("#f59e0b" if bar_pct > 35 else "#f87171")
         sm_cells += f"""
-<div class="style-cell">
+<div class="style-cell {day_tint}">
   <div class="style-label">{code} · {lbl}</div>
   <div class="style-val {dc}">{d['day_chg']:+.2f}%</div>
   <div class="breadth-bar-wrap" style="margin:0.2rem auto;"><div class="breadth-bar" style="width:{bar_pct:.0f}%;background:{bar_c}"></div></div>
@@ -2184,10 +2190,10 @@ Jeff Sun / jfsrev — Daily Market Dashboard · Breadth · Indices · Sectors ·
         mc = _color(d["perf_1m"])
         hc = _color(d["pct_52h"], -5, -15, reverse=True)
         lc = _color(d["pct_52l"])
-        # Position in 52w range as 0-100%
-        rng = d["pct_52l"] - d["pct_52h"]
-        pos = (d["pct_52l"] / rng * 100) if rng > 0 else 50
-        pos = max(0, min(100, pos))
+        # Correct linear range position
+        a, b = d["pct_52l"], d["pct_52h"]
+        denom = (a - b)
+        pos = max(0, min(100, a * (1 + b / 100) / denom * 100)) if denom > 0.01 else 50
         bar_c = "#34d399" if pos > 65 else ("#f59e0b" if pos > 35 else "#f87171")
         star_span = f'<span class="dash-cell star"> {star}</span>' if star else ""
         st.markdown(f"""
@@ -3459,4 +3465,4 @@ with tab_guide:
 "It will take 3-4 earnings seasons to get good at trading EP, 5-6 if you are a moron. For me it probably took 7 or 8."
 <span>-- Kristjan Kullamägi</span>
 </div>
-""", unsafe_allow_html=True)    
+""", unsafe_allow_html=True)
