@@ -1017,7 +1017,6 @@ def phase1_breakout(min_perf_1m: float, min_vol: int, min_price: float,
                 Column("volume") > min_vol,
                 Column("Perf.1M") >= min_perf_1m,
                 Column("close") > Column("SMA50"),      # above long-term MA
-                Column("close") < Column("SMA10") * 1.12,  # BO6: within 12% of 10-day -- surfing MA, not extended above it
                 Column("relative_volume_10d_calc") < 1.5,  # volume drying up = consolidation
             )
             .order_by("Perf.3M", ascending=False)
@@ -1057,6 +1056,10 @@ def phase1_breakout(min_perf_1m: float, min_vol: int, min_price: float,
     df = df.fillna(0.0)
     # U1: ADR >= 3% floor -- removes truly non-tradeable low-vol stocks
     df = df[(df["ATR"] / df["close"] * 100) >= 3]
+    # BO6: surfing 10-day MA — close within 12% above SMA10
+    # Column * scalar not supported in .where(), so applied here as post-filter
+    if "SMA10" in df.columns:
+        df = df[(df["SMA10"] > 0) & (df["close"] < df["SMA10"] * 1.12)]
     df["is_etf"] = df["type"].isin(["fund", "etf", "dr"])
 
     return (
@@ -1421,6 +1424,11 @@ def run_parabolic_long_scan(min_drop_5d, min_price, asset_filter, exchange_filte
 
 
 
+def crit(status, text):
+    """Build one criteria row: status='pass'|'warn'|'fail', text=display string."""
+    icon = "✓" if status == "pass" else ("▲" if status == "warn" else "✗")
+    return f'<div class="crit {status}"><span class="crit-icon">{icon}</span><span class="crit-text">{text}</span></div>'
+
 # ─────────────────────────────────────────────────────────────────────────────
 #  MARKET DASHBOARD  — Jeff Sun / jfsrev daily market diary framework
 #  Breadth · Indices · Size/Style Matrix · Sectors · Liquid Mega List
@@ -1471,14 +1479,12 @@ INDEX_META = {
     "DIA":  ("Dow 30",       "cap-wt"),
 }
 
-@st.cache_data(ttl=300, show_spinner=False)
-def fetch_ticker_metrics(ticker: str) -> dict | None:
-    """Fetch 1-year daily data and compute key metrics for one ticker."""
+def _compute_ticker_metrics(ticker: str, df) -> dict | None:
+    """Core metric computation from a pre-loaded DataFrame.
+    Shared by fetch_ticker_metrics (single) and fetch_group_metrics (batch).
+    df must have columns: Close, High, Low, Volume (auto_adjust=True).
+    """
     try:
-        df = yf.download(ticker, period="1y", interval="1d",
-                         progress=False, auto_adjust=True)
-        if df is None or df.empty or len(df) < 10:
-            return None
         if isinstance(df.columns, pd.MultiIndex):
             df.columns = df.columns.get_level_values(0)
         close = df["Close"].squeeze().dropna()
@@ -1487,53 +1493,66 @@ def fetch_ticker_metrics(ticker: str) -> dict | None:
         vol   = df["Volume"].squeeze() if "Volume" in df.columns else None
 
         n = len(close)
-        last      = float(close.iloc[-1])
-        prev      = float(close.iloc[-2]) if n >= 2 else last
-        day_chg   = (last - prev) / prev * 100 if prev > 0 else 0.0
+        if n < 10:
+            return None
+        last    = float(close.iloc[-1])
+        prev    = float(close.iloc[-2]) if n >= 2 else last
+        day_chg = (last - prev) / prev * 100 if prev > 0 else 0.0
 
         def perf(days):
-            idx = max(0, n - days - 1)
+            idx  = max(0, n - days - 1)
             base = float(close.iloc[idx])
             return (last - base) / base * 100 if base > 0 else 0.0
 
-        w52_high  = float(high.max())
-        w52_low   = float(low.min())
-        pct_52h   = (last - w52_high) / w52_high * 100   # negative = below 52w high
-        pct_52l   = (last - w52_low)  / w52_low  * 100   # positive = above 52w low
+        w52_high = float(high.max())
+        w52_low  = float(low.min())
+        pct_52h  = (last - w52_high) / w52_high * 100
+        pct_52l  = (last - w52_low)  / w52_low  * 100
 
-        # Moving averages
         sma20 = float(close.tail(20).mean()) if n >= 20 else None
         sma50 = float(close.tail(50).mean()) if n >= 50 else None
 
-        # ADR% (14-day average daily range as % of close)
         if n >= 14:
             recent_hl = (high.tail(14) - low.tail(14)) / close.tail(14)
             adr_pct   = float(recent_hl.mean() * 100)
         else:
             adr_pct = None
 
-        # Volume trend (recent avg vs 50-day avg)
-        avg_vol_20  = float(vol.tail(20).mean())  if vol is not None and n >= 20 else None
-        avg_vol_50  = float(vol.tail(50).mean())  if vol is not None and n >= 50 else None
-        rvol_20v50  = avg_vol_20 / avg_vol_50 if avg_vol_20 and avg_vol_50 and avg_vol_50 > 0 else None
+        avg_vol_20 = float(vol.tail(20).mean()) if vol is not None and n >= 20 else None
+        avg_vol_50 = float(vol.tail(50).mean()) if vol is not None and n >= 50 else None
+        rvol_20v50 = avg_vol_20 / avg_vol_50 if avg_vol_20 and avg_vol_50 and avg_vol_50 > 0 else None
 
         return {
-            "ticker":    ticker,
-            "last":      round(last, 2),
-            "day_chg":   round(day_chg,   2),
-            "perf_1w":   round(perf(5),   1),
-            "perf_1m":   round(perf(21),  1),
-            "perf_3m":   round(perf(63),  1),
-            "perf_6m":   round(perf(126), 1),
-            "pct_52h":   round(pct_52h,   1),
-            "pct_52l":   round(pct_52l,   1),
-            "above_20":  (sma20 is not None and last > sma20),
-            "above_50":  (sma50 is not None and last > sma50),
-            "sma20":     round(sma20, 2) if sma20 else None,
-            "sma50":     round(sma50, 2) if sma50 else None,
-            "adr_pct":   round(adr_pct, 2) if adr_pct else None,
+            "ticker":     ticker,
+            "last":       round(last, 2),
+            "day_chg":    round(day_chg, 2),
+            "perf_1w":    round(perf(5),   1),
+            "perf_1m":    round(perf(21),  1),
+            "perf_3m":    round(perf(63),  1),
+            "perf_6m":    round(perf(126), 1),
+            "pct_52h":    round(pct_52h,   1),
+            "pct_52l":    round(pct_52l,   1),
+            "above_20":   (sma20 is not None and last > sma20),
+            "above_50":   (sma50 is not None and last > sma50),
+            "sma20":      round(sma20, 2) if sma20 else None,
+            "sma50":      round(sma50, 2) if sma50 else None,
+            "adr_pct":    round(adr_pct, 2) if adr_pct else None,
             "rvol_trend": round(rvol_20v50, 2) if rvol_20v50 else None,
         }
+    except Exception:
+        return None
+
+
+def fetch_ticker_metrics(ticker: str) -> dict | None:
+    """Fetch 1-year daily data and compute key metrics for one ticker.
+    Delegates computation to _compute_ticker_metrics() for DRY code.
+    """
+    try:
+        df = yf.download(ticker, period="1y", interval="1d",
+                         progress=False, auto_adjust=True)
+        if df is None or df.empty or len(df) < 10:
+            return None
+        return _compute_ticker_metrics(ticker, df)
     except Exception:
         return None
 
@@ -1598,16 +1617,52 @@ def fetch_breadth_from_tv() -> dict:
     return result
 
 
-def fetch_group_metrics(tickers: list, workers: int = 10) -> dict:
-    """Fetch metrics for a group of tickers in parallel."""
+@st.cache_data(ttl=300, show_spinner=False)
+def fetch_group_metrics(tickers: tuple, workers: int = 10) -> dict:
+    """Fetch metrics for a group of tickers using yf.download batch API.
+
+    Uses a single yf.download() call for all tickers at once (much faster,
+    no threading cache collision). Falls back to individual fetches for any
+    tickers that fail in the batch.
+    """
+    tickers = list(tickers)
     results = {}
-    with ThreadPoolExecutor(max_workers=workers) as ex:
-        futs = {ex.submit(fetch_ticker_metrics, t): t for t in tickers}
-        for fut in as_completed(futs):
-            t   = futs[fut]
-            res = fut.result()
-            if res:
-                results[t] = res
+    if not tickers:
+        return results
+    try:
+        # Batch download — yf returns MultiIndex columns when >1 ticker
+        df_all = yf.download(
+            tickers, period="1y", interval="1d",
+            progress=False, auto_adjust=True, group_by="ticker",
+            threads=True
+        )
+        if df_all is None or df_all.empty:
+            raise ValueError("Empty batch download")
+
+        for ticker in tickers:
+            try:
+                # Extract single-ticker slice from MultiIndex
+                if len(tickers) == 1:
+                    df = df_all.copy()
+                else:
+                    df = df_all[ticker].copy()
+                if df is None or df.empty or len(df) < 10:
+                    continue
+                df = df.dropna(subset=["Close"])
+                res = _compute_ticker_metrics(ticker, df)
+                if res:
+                    results[ticker] = res
+            except Exception:
+                continue
+    except Exception:
+        # Fallback: fetch individually
+        for ticker in tickers:
+            try:
+                res = fetch_ticker_metrics(ticker)
+                if res:
+                    results[ticker] = res
+            except Exception:
+                continue
     return results
 
 
@@ -1925,7 +1980,7 @@ Jeff Sun / jfsrev — Daily Market Dashboard · Breadth · Indices · Sectors ·
             all_tickers = (list(SECTOR_META.keys()) + list(STYLE_META.keys()) +
                            list(INDEX_META.keys()) + MEGA_LIST_DEFAULT)
             all_tickers = list(dict.fromkeys(all_tickers))
-            mdata = fetch_group_metrics(all_tickers, workers=16)
+            mdata = fetch_group_metrics(tuple(all_tickers), workers=16)
             breadth = fetch_breadth_from_tv()
             st.session_state["dash_mdata"]   = mdata
             st.session_state["dash_breadth"] = breadth
@@ -2165,7 +2220,7 @@ Jeff Sun / jfsrev — Daily Market Dashboard · Breadth · Indices · Sectors ·
         if st.button("Apply Mega List", key="apply_mega"):
             tickers_new = [t.strip().upper() for t in custom.split(",") if t.strip()]
             with st.spinner("Fetching…"):
-                new_data = fetch_group_metrics(tickers_new, workers=16)
+                new_data = fetch_group_metrics(tuple(tickers_new), workers=16)
             st.session_state["dash_mdata"].update(new_data)
             st.rerun()
 
@@ -2366,10 +2421,6 @@ Also elevated: {others_txt}
   <div class="empty-hint">Try lowering Min ATR Multiple or broadening universe filters</div>
 </div>""", unsafe_allow_html=True)
         else:
-            def crit(status, text):
-                """Build one criteria row: status='pass'|'warn'|'fail', text=display string."""
-                icon = "✓" if status == "pass" else ("▲" if status == "warn" else "✗")
-                return f'<div class="crit {status}"><span class="crit-icon">{icon}</span><span class="crit-text">{text}</span></div>'
 
             def atr_cls(m):
                 if m >= 15: return "atr-extreme"
